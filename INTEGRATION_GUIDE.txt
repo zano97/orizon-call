@@ -241,9 +241,12 @@ Security: only files starting with "recording_" are served. Path traversal is
 blocked (no slashes or ".." allowed in filename).
 
 Example:
-  const res = await fetch('http://127.0.0.1:19876/files/recording_20260412_143022.wav');
+  const res = await fetch(
+    'http://127.0.0.1:19876/files/recording_20260412_143022.wav',
+    { headers: { 'Authorization': `Bearer ${token}` } });
   const blob = await res.blob();
   // Upload blob to your server, or create a download link
+  // (or simply: const blob = await orizon.downloadFile(filename);)
 
 ------------------------------------------------------------------------------
   POST /start
@@ -463,10 +466,12 @@ HTTP Status Codes:
   200  Success
   204  CORS preflight OK (OPTIONS)
   400  Bad request (invalid filename)
-  403  Forbidden (file access denied - not a recording file)
+  401  Unauthorized (missing bearer token)
+  403  Forbidden (invalid token, disallowed Host header, or access to a
+       non-recording file)
   404  Not found (unknown endpoint or file)
   409  Conflict (wrong state for the requested action)
-  503  Recorder not ready (app still initializing)
+  503  Recorder not ready (app still initializing) or too many SSE streams
 
 Connection refused (fetch throws TypeError/NetworkError):
   The desktop app is not running. Show the user a message to start it.

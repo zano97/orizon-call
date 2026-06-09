@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import socket
 import stat
@@ -117,9 +118,14 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
     # Endpoints that do NOT require auth.
     PUBLIC_PATHS = {"/health"}
 
+    _TOKEN_RE = re.compile(r"(token=)[^&\s\"]+")
+
     def log_message(self, format, *args):
         # Suppress default stderr access log; the logger is enough.
-        log.debug(format % args)
+        # Redact query-string tokens (?token=... on /events) — the debug
+        # log must never persist the bearer secret.
+        message = format % args
+        log.debug(self._TOKEN_RE.sub(r"\1<redacted>", message))
 
     # ---------- Host validation (DNS rebinding) ----------
 

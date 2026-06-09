@@ -199,6 +199,11 @@ final class AudioCaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             return nil
         }
 
+        // blockBuffer owns the memory the ABL's mData pointers reference:
+        // keep it alive for the whole read (ARC could otherwise release it
+        // right after the last *source-visible* use above).
+        return withExtendedLifetime(blockBuffer) { () -> Data? in
+
         let bufList = UnsafeMutableAudioBufferListPointer(ablPtr)
 
         // Build the interleaved Float32 stereo output we promise to stdout.
@@ -248,6 +253,8 @@ final class AudioCaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         return out.withUnsafeBufferPointer { Data(buffer: $0) }
+
+        }  // withExtendedLifetime(blockBuffer)
     }
 
 }

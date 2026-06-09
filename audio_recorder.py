@@ -114,6 +114,20 @@ class _StreamingResampler:
                 self._soxr = None
         return self._linear(data)
 
+    def flush(self) -> np.ndarray:
+        """Drain the filter-delay samples soxr keeps in flight. Call once,
+        at the end of a recording, so the last few milliseconds of audio
+        are not lost."""
+        empty = (np.zeros((0, self.channels), dtype=np.float32)
+                 if self.channels > 1 else np.zeros(0, dtype=np.float32))
+        if self._soxr is None:
+            return empty
+        try:
+            out = self._soxr.resample_chunk(empty, last=True)
+            return out.astype(np.float32, copy=False)
+        except Exception:
+            return empty
+
     def _linear(self, data: np.ndarray) -> np.ndarray:
         buf = data if self._tail is None else np.concatenate([self._tail, data], axis=0)
         n_in = buf.shape[0]
@@ -175,6 +189,7 @@ class AudioRecorder:
         self._pause_event = threading.Event()
         self._pause_event.set()
         self._finalizing = False  # True while stop()/emergency save finalizes
+        self._zombie_writer: Optional[threading.Thread] = None  # stuck writer
 
         # Timing
         self._elapsed_seconds: float = 0.0
@@ -352,8 +367,11 @@ class AudioRecorder:
             return 0.0
         if self._state in (RecordingState.PAUSED, RecordingState.STOPPING):
             return self._elapsed_seconds
-        if self._state == RecordingState.RECORDING and self._recording_start_time is not None:
-            return self._elapsed_seconds + (time.monotonic() - self._recording_start_time)
+        # Single read: pause()/stop() can null the attribute between the
+        # check and the use (this property is read from API/UI threads).
+        start = self._recording_start_time
+        if self._state == RecordingState.RECORDING and start is not None:
+            return self._elapsed_seconds + (time.monotonic() - start)
         return self._elapsed_seconds
 
     @property
@@ -388,6 +406,16 @@ class AudioRecorder:
                 raise RuntimeError(f"Cannot start from state {self._state}")
             if self._mic_device is None:
                 raise RuntimeError("No microphone available.")
+            # A wedged writer from a previous session still owns the shared
+            # file attributes; starting now would let it write into (and
+            # close) the new session's file.
+            zombie = self._zombie_writer
+            if zombie is not None:
+                if zombie.is_alive():
+                    raise RuntimeError(
+                        "La registrazione precedente non è ancora stata "
+                        "finalizzata. Riprova tra qualche secondo.")
+                self._zombie_writer = None
 
             # Check disk space
             self._check_disk_space(raise_on_low=True)
@@ -504,9 +532,15 @@ class AudioRecorder:
         # The writer finalizes (flushes + closes) the output file itself
         # before exiting — it is the only thread that touches the file.
         writer = self._writer_thread
+        writer_stuck = False
         if writer is not None:
             writer.join(timeout=10.0)
             if writer.is_alive():
+                # Wedged (e.g. blocked on a hung volume). The file is still
+                # open and owned by it: remember the zombie so start() can
+                # refuse a new session that would share the file attributes.
+                writer_stuck = True
+                self._zombie_writer = writer
                 self._report_error("Writer thread did not stop in time.")
             self._writer_thread = None
 
@@ -524,21 +558,22 @@ class AudioRecorder:
 
         # Safety net: if the writer died without finalizing, do it here
         # (it is no longer running, so no concurrent access).
-        if self._output_file is not None and (writer is None or not writer.is_alive()):
+        if self._output_file is not None and not writer_stuck:
             self._finalize_segment()
 
         if self._dropped_chunks:
             log.warning("Recording dropped %d audio chunks (writer overloaded).",
                         self._dropped_chunks)
 
-        # Post-stop loudness normalization (before MP3 conversion so the
-        # LUFS-normalised PCM is what gets encoded).
-        if self._normalize_lufs is not None:
-            self._loudness_normalize_segments(self._normalize_lufs)
-
-        # Convert to MP3 if needed
-        if self._output_format == 'mp3':
-            self._convert_to_mp3()
+        # Post-processing must never run on a file a wedged writer still
+        # holds open (MP3 conversion would even delete the WAV under it).
+        if not writer_stuck:
+            # Loudness normalization first, so the LUFS-normalised PCM is
+            # what gets encoded to MP3.
+            if self._normalize_lufs is not None:
+                self._loudness_normalize_segments(self._normalize_lufs)
+            if self._output_format == 'mp3':
+                self._convert_to_mp3()
 
         with self._lock:
             self._state = RecordingState.IDLE
@@ -586,9 +621,12 @@ class AudioRecorder:
             if self._state == RecordingState.RECORDING:
                 # start() flipped the state while we waited on the lock:
                 # the ring was already snapshotted, so route to the queue
-                # to preserve sample order.
+                # to preserve sample order. Re-read the queue attribute —
+                # the one passed in may belong to the previous session
+                # (start() swaps queues before flipping the state).
+                live_q = self._mic_queue if ring is self._mic_ring else self._sys_queue
                 try:
-                    q.put_nowait((chunk, rate))
+                    live_q.put_nowait((chunk, rate))
                 except queue.Full:
                     self._dropped_chunks += 1
                 return
@@ -1070,6 +1108,13 @@ class AudioRecorder:
             self._ingest(mic_q, mic_pending, resamplers, to_mono=True)
             if session_has_sys:
                 self._ingest(sys_q, sys_pending, resamplers, to_mono=False)
+            # Flush the resamplers' filter delay into the right buffer.
+            for (is_mono, _rate), rs in resamplers.items():
+                tail = rs.flush()
+                if tail.shape[0]:
+                    (mic_pending if is_mono else sys_pending).append(tail)
+
+            if session_has_sys:
                 n = min(self._pending_frames(mic_pending),
                         self._pending_frames(sys_pending))
                 if n > 0:
@@ -1106,6 +1151,11 @@ class AudioRecorder:
             self._finalize_segment()
         except Exception:
             pass
+        if self._finalizing:
+            # A user-initiated stop() is mid-flight and owns the teardown
+            # and the STOPPING→IDLE transition; flipping state from here
+            # would let a new start() race the ffmpeg post-processing.
+            return
         # Tear down capture unless pre-roll wants the streams alive.
         # recovery_lock orders this against any in-flight watchdog restart.
         try:
@@ -1130,9 +1180,12 @@ class AudioRecorder:
 
     def _watchdog_loop(self, stop_event: threading.Event,
                        writer: threading.Thread) -> None:
-        # Track consecutive recovery attempts per source to implement backoff.
+        # Consecutive failed recoveries per source. A failed restart leaves
+        # the stream object None, so the attempt counter (not the object)
+        # is what keeps the retry loop alive until MAX_ATTEMPTS.
         mic_attempts = 0
-        sys_attempts = 0
+        sck_attempts = 0
+        wasapi_attempts = 0
         MAX_ATTEMPTS = 3
 
         while not stop_event.is_set():
@@ -1150,15 +1203,16 @@ class AudioRecorder:
             # 2. Mic stream health (sounddevice). active=False after device
             #    disappears (e.g. user unplugged headphones).
             mic_dead = (
-                self._mic_stream is not None
-                and not getattr(self._mic_stream, "active", True)
+                (self._mic_stream is not None
+                 and not getattr(self._mic_stream, "active", True))
+                or (self._mic_stream is None and mic_attempts > 0)
             )
             if mic_dead:
                 if mic_attempts >= MAX_ATTEMPTS:
-                    self._report_error(
-                        "Microphone disconnected and could not be recovered. Stopping."
-                    )
-                    stop_event.set()
+                    self._auto_stop_session(
+                        stop_event,
+                        "Microfono scollegato e non recuperabile. "
+                        "Registrazione interrotta.")
                     break
                 mic_attempts += 1
                 log.warning("Mic stream inactive — recovery attempt %d/%d",
@@ -1176,48 +1230,95 @@ class AudioRecorder:
 
             # 3. SCK helper process health (macOS system audio)
             sck = self._sck_source
-            if sck is not None and not sck.is_running():
-                if sys_attempts >= MAX_ATTEMPTS:
+            sck_dead = (
+                (sck is not None and not sck.is_running())
+                or (sck is None and sck_attempts > 0)
+            )
+            if sck_dead:
+                if sck_attempts >= MAX_ATTEMPTS:
                     self._report_error(
-                        "System audio helper crashed and could not be recovered."
-                    )
+                        "Audio di sistema perso (helper non recuperabile). "
+                        "La registrazione continua solo col microfono.")
                     self._has_system_audio = False
-                    sys_attempts = MAX_ATTEMPTS + 1  # don't keep trying
+                    sck_attempts = 0  # give up: predicate stays False now
+                    with self._recovery_lock:
+                        if self._sck_source is not None:
+                            try:
+                                self._sck_source.stop()
+                            except Exception:
+                                pass
+                            self._sck_source = None
                 else:
-                    sys_attempts += 1
+                    sck_attempts += 1
                     log.warning("SCK helper inactive — restart attempt %d/%d",
-                                sys_attempts, MAX_ATTEMPTS)
+                                sck_attempts, MAX_ATTEMPTS)
                     with self._recovery_lock:
                         if stop_event.is_set():
                             break
                         recovered = self._restart_sck_source()
                     if recovered:
-                        sys_attempts = 0
+                        sck_attempts = 0
                     else:
-                        stop_event.wait(timeout=min(2.0 * sys_attempts, 6.0))
+                        stop_event.wait(timeout=min(2.0 * sck_attempts, 6.0))
             elif sck is not None:
-                sys_attempts = 0
+                sck_attempts = 0
 
             # 4. WASAPI reader health (Windows): the thread exits when the
             #    stream errors, so a dead reader means the stream must be
             #    fully reopened (a bare thread restart would just die again).
-            if (self._wasapi_thread is not None
-                    and not self._wasapi_thread.is_alive()
-                    and self._wasapi_stream is not None):
-                sys_attempts += 1
-                if sys_attempts > MAX_ATTEMPTS:
-                    self._report_error("System audio (WASAPI) lost and could not be recovered.")
+            wasapi_dead = (
+                (self._wasapi_thread is not None
+                 and not self._wasapi_thread.is_alive()
+                 and self._wasapi_stream is not None)
+                or (self._wasapi_stream is None and wasapi_attempts > 0)
+            )
+            if wasapi_dead:
+                if wasapi_attempts >= MAX_ATTEMPTS:
+                    self._report_error(
+                        "Audio di sistema perso (WASAPI non recuperabile). "
+                        "La registrazione continua solo col microfono.")
                     self._has_system_audio = False
+                    wasapi_attempts = 0  # give up: predicate stays False now
                 else:
+                    wasapi_attempts += 1
                     log.warning("WASAPI reader died — reopen attempt %d/%d",
-                                sys_attempts, MAX_ATTEMPTS)
+                                wasapi_attempts, MAX_ATTEMPTS)
                     with self._recovery_lock:
                         if stop_event.is_set():
                             break
                         if self._restart_wasapi():
-                            sys_attempts = 0
+                            wasapi_attempts = 0
                         else:
-                            stop_event.wait(timeout=min(2.0 * sys_attempts, 6.0))
+                            stop_event.wait(timeout=min(2.0 * wasapi_attempts, 6.0))
+
+    def _auto_stop_session(self, stop_event: threading.Event, message: str) -> None:
+        """
+        Watchdog escalation: capture is unrecoverable. Stop the session the
+        same way a user stop would: the writer drains and finalizes the
+        file, streams are torn down, state reaches IDLE so the UI/API can
+        reconcile (no zombie RECORDING state).
+        """
+        self._report_error(message)
+        stop_event.set()
+        self._pause_event.set()
+        writer = self._writer_thread
+        if writer is not None and writer.is_alive():
+            writer.join(timeout=5.0)
+        if self._finalizing:
+            return  # a user stop() owns the rest of the teardown
+        with self._recovery_lock:
+            if not self._preroll_active:
+                self._close_streams()
+        acquired = self._lock.acquire(timeout=2.0)
+        try:
+            if self._state != RecordingState.IDLE:
+                self._elapsed_seconds = self.elapsed_time
+                self._recording_start_time = None
+                self._state = RecordingState.IDLE
+        finally:
+            if acquired:
+                self._lock.release()
+        log.info("Session auto-stopped: %s", self._output_path)
 
     def _restart_mic_stream(self) -> bool:
         """Close + reopen the microphone stream. Returns True on success."""
@@ -1336,10 +1437,17 @@ class AudioRecorder:
         else:
             log.warning("Emergency save: writer still alive, file left to it.")
 
+        # Serialize against in-flight watchdog restarts (bounded: a couple
+        # of seconds at most), with a timeout so a signal handler can never
+        # hang here.
+        got_recovery = self._recovery_lock.acquire(timeout=5.0)
         try:
             self._close_streams()
         except Exception as e:
             log.warning("Emergency save: close_streams failed: %s", e)
+        finally:
+            if got_recovery:
+                self._recovery_lock.release()
 
         # Non-blocking state transition: the signal handler runs on the main
         # thread, which may already hold self._lock (it is not reentrant).
@@ -1355,11 +1463,10 @@ class AudioRecorder:
     # ---------- Audio Mixing ----------
 
     def _mix_frames(self, mic_data: Optional[np.ndarray], sys_data: Optional[np.ndarray]) -> np.ndarray:
-        if mic_data is not None and self._mic_samplerate != SAMPLE_RATE:
-            mic_data = self._resample(mic_data, self._mic_samplerate, SAMPLE_RATE)
-        if sys_data is not None and self._sys_samplerate != SAMPLE_RATE:
-            sys_data = self._resample(sys_data, self._sys_samplerate, SAMPLE_RATE)
-
+        # Inputs are ALWAYS already at SAMPLE_RATE: the writer's ingest stage
+        # resamples every chunk with the per-rate streaming resamplers.
+        # Resampling here again (by the live device rate) would stretch the
+        # audio a second time for any non-48 kHz device.
         if self._auto_balance:
             mic_data, sys_data = self._apply_auto_balance(mic_data, sys_data)
 

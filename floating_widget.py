@@ -112,8 +112,11 @@ class Toast(QWidget):
         }.get(kind, COLOR_GREEN)
 
         flags = (Qt.WindowType.FramelessWindowHint
-                 | Qt.WindowType.WindowStaysOnTopHint
-                 | Qt.WindowType.Tool)
+                 | Qt.WindowType.WindowStaysOnTopHint)
+        if sys.platform != 'darwin':
+            # On macOS a Tool window hides whenever the app is inactive —
+            # which is this app's normal condition (accessory, no dock).
+            flags |= Qt.WindowType.Tool
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -452,6 +455,8 @@ class FloatingRecorderWidget(QWidget):
         self._is_dragging = False
         self._busy = False          # a start/stop worker is in flight
         self._ui_recording = False  # pill currently shown
+        self._pending_stop = False  # stop requested while a start worker ran
+        self._quit_when_done = False  # quit once the in-flight stop finishes
         self._hover = 0.0
         self._raise_timer: QTimer | None = None
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
@@ -926,12 +931,22 @@ class FloatingRecorderWidget(QWidget):
             self._level_bar.reset()
             self._expand_to_pill()
             self.recording_started.emit(payload)
+            if self._pending_stop:
+                # A stop (e.g. via API) arrived while the start worker ran:
+                # honor it now that the recording actually exists.
+                self._pending_stop = False
+                QTimer.singleShot(0, lambda: self._handle_stop())
         else:
+            self._pending_stop = False
+            self.setToolTip("Clicca per registrare — trascina per spostare")
             if getattr(self, "_start_interactive", True):
                 self._show_start_error(payload)
             else:
                 Toast(f"Impossibile avviare la registrazione: {payload}",
                       kind="error").show_above(self)
+            if self._quit_when_done:
+                self._quit_when_done = False
+                QApplication.quit()
 
     def _show_start_error(self, message: str) -> None:
         box = QMessageBox(self)
@@ -963,9 +978,18 @@ class FloatingRecorderWidget(QWidget):
     def _handle_stop(self, quit_after: bool = False) -> None:
         """Stop on a worker thread; the pill switches to a 'saving' state
         immediately and shrinks when the file is finalized."""
+        if quit_after:
+            self._quit_when_done = True
         if self._busy:
+            # Start or stop worker in flight. If it's a start, remember the
+            # stop request (already acknowledged to the API caller); if it's
+            # a stop, _quit_when_done above is all we needed to record.
+            self._pending_stop = True
             return
         if self._recorder.state not in (RecordingState.RECORDING, RecordingState.PAUSED):
+            if self._quit_when_done:
+                self._quit_when_done = False
+                QApplication.quit()
             return
         self._busy = True
         self._enter_saving_ui()
@@ -991,6 +1015,9 @@ class FloatingRecorderWidget(QWidget):
     def _on_stop_done(self, ok: bool, payload: str, quit_after: bool) -> None:
         self._busy = False
         self._ui_recording = False
+        self._pending_stop = False  # already stopped; drop any queued stop
+        quit_after = quit_after or self._quit_when_done
+        self._quit_when_done = False
         self._stop_btn.setEnabled(True)
         self._status_dot.stop_pulsing(COLOR_WHITE_DIM)
         self._shrink_to_circle()
@@ -1004,8 +1031,18 @@ class FloatingRecorderWidget(QWidget):
                 Toast(f"Salvato: {name}\nClicca per aprire la cartella",
                       on_click=self._open_recordings_folder).show_above(self)
         elif not ok:
-            Toast(f"Errore durante il salvataggio: {payload}",
-                  kind="error", duration_ms=6000).show_above(self)
+            if quit_after:
+                # A toast would die with the process: the failure must be
+                # seen before we exit.
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Icon.Warning)
+                box.setWindowTitle("Orizon Call — Errore di salvataggio")
+                box.setText("Errore durante il salvataggio della registrazione.")
+                box.setInformativeText(payload)
+                box.exec()
+            else:
+                Toast(f"Errore durante il salvataggio: {payload}",
+                      kind="error", duration_ms=6000).show_above(self)
 
         if quit_after:
             QApplication.quit()
@@ -1031,6 +1068,11 @@ class FloatingRecorderWidget(QWidget):
     def _quit_app(self, confirm: bool = False) -> None:
         """Quit, stopping and saving any recording first (asynchronously —
         quit must not freeze the UI either)."""
+        if self._busy or self._recorder.state == RecordingState.STOPPING:
+            # A save is already in flight: don't kill its worker thread —
+            # exit as soon as it completes.
+            self._quit_when_done = True
+            return
         state = self._recorder.state
         if state in (RecordingState.RECORDING, RecordingState.PAUSED):
             if confirm:
@@ -1045,6 +1087,9 @@ class FloatingRecorderWidget(QWidget):
                 box.button(QMessageBox.StandardButton.Cancel).setText("Annulla")
                 if box.exec() != QMessageBox.StandardButton.Yes:
                     return
+            # State may have changed while the dialog was open (API stop):
+            # _handle_stop handles every case, including quitting directly
+            # if the recorder is already idle.
             self._handle_stop(quit_after=True)
         else:
             QApplication.quit()
@@ -1079,13 +1124,20 @@ class FloatingRecorderWidget(QWidget):
     def _on_anim_finished(self) -> None:
         if self._anim_direction == 1:
             self.setFixedSize(PILL_WIDTH, PILL_HEIGHT)
-            self._timer_label.setText("00:00")
-            self._mute_btn.setVisible(True)
-            self._pause_btn.setVisible(True)
             self._set_pill_contents_visible(True)
-            self._status_dot.start_pulsing(COLOR_RED)
-            self._pause_btn.set_icon_name("pause")
-            self._pause_btn.setToolTip("Pausa")
+            # Derive the pill contents from the ACTUAL state: pause/stop
+            # may have arrived while the expand animation was running.
+            if self._busy:
+                self._enter_saving_ui()
+            elif self._recorder.state == RecordingState.PAUSED:
+                self._status_dot.stop_pulsing(COLOR_YELLOW)
+                self._pause_btn.set_icon_name("play")
+                self._pause_btn.setToolTip("Riprendi")
+            else:
+                self._timer_label.setText("00:00")
+                self._status_dot.start_pulsing(COLOR_RED)
+                self._pause_btn.set_icon_name("pause")
+                self._pause_btn.setToolTip("Pausa")
         elif self._anim_direction == -1:
             self.setFixedSize(CIRCLE_SIZE, CIRCLE_SIZE)
 
@@ -1104,6 +1156,7 @@ class FloatingRecorderWidget(QWidget):
             self._ui_recording = False
             self._status_dot.stop_pulsing(COLOR_WHITE_DIM)
             self._shrink_to_circle()
+            self.setToolTip("Clicca per registrare — trascina per spostare")
             path = self._recorder.output_path
             if path:
                 self.recording_stopped.emit(str(path))

@@ -47,6 +47,10 @@ def _try_bind_or_explain(port: int) -> "socket.socket | None":
     import errno
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Allow rebinding over TIME_WAIT remnants of a previous run (instant
+    # app restart). Does not weaken the single-instance check: binding
+    # over a LIVE listener still fails without SO_REUSEPORT.
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(("127.0.0.1", port))
         return s

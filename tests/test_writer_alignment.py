@@ -197,3 +197,39 @@ class TestAutoStop:
         assert _wait_for(lambda: recorder.state == RecordingState.IDLE)
         data, _ = sf.read(str(path), always_2d=True)
         assert data.shape[0] >= 1024  # audio up to the failure is saved
+
+
+class TestNoDoubleResample:
+
+    def test_mix_frames_never_resamples(self, recorder):
+        """Regression: writer data is already 48 kHz when _mix_frames runs;
+        a non-48k device rate must NOT trigger a second resample (it would
+        stretch the audio ~9% and zero-pad the system channel)."""
+        recorder._mic_samplerate = 44100.0
+        recorder._sys_samplerate = 44100.0
+        mic = np.full(48000, 0.5, dtype=np.float32)
+        sys_ = np.full((48000, 2), 0.25, dtype=np.float32)
+        out = recorder._mix_frames(mic, sys_)
+        assert out.shape[0] == 48000, (
+            f"_mix_frames changed the frame count: {out.shape[0]}")
+        out_mic_only = recorder._mix_frames(mic, None)
+        assert out_mic_only.shape[0] == 48000
+
+    def test_end_to_end_44100_mic_correct_duration(self, recorder):
+        """A 44.1 kHz mic session must produce a file whose frame count
+        matches the captured duration exactly once-resampled."""
+        recorder._mic_samplerate = 44100.0
+        path = recorder.start()
+        n = 20
+        for _ in range(n):
+            recorder._mic_queue.put_nowait(
+                (np.full((1024, 1), 0.5, dtype=np.float32), 44100.0))
+        time.sleep(0.4)
+        recorder.stop()
+        data, _ = sf.read(str(path), always_2d=True)
+        expected = n * 1024 * 48000 / 44100
+        # Streaming-resampler flush recovers the filter delay; allow a
+        # few samples of rounding.
+        assert abs(data.shape[0] - expected) < 64, (
+            f"got {data.shape[0]} frames, expected ~{expected:.0f}")
+        assert np.allclose(data[100:-100], 0.5, atol=0.02)
