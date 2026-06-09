@@ -138,6 +138,14 @@ Auth: every request except GET /health and OPTIONS must include
         Authorization: Bearer <token>
 where <token> is the contents of ~/.orizon-call/token (one line, no spaces).
 Missing → 401, wrong → 403. The token rotates every time the app starts.
+The token is never written to the logs.
+
+GET /events also accepts the token as a query parameter (?token=<token>)
+because the browser EventSource API cannot send custom headers.
+
+Host-header validation: requests whose Host is not localhost/127.0.0.1/::1
+are rejected with 403 (protects against DNS-rebinding pages even when
+--no-auth is used).
 
 ------------------------------------------------------------------------------
   GET /health           (no auth required)
@@ -154,23 +162,27 @@ Get current recorder state, audio levels, and file info.
 
 Response 200:
   {
-    "state": "idle" | "recording" | "paused",
+    "state": "idle" | "recording" | "paused" | "stopping",
     "elapsed": 12.5,
     "has_system_audio": true,
     "output_path": "/Users/.../recording_20260412_143022.wav",
     "muted": false,
     "mic_level": 0.0342,
     "sys_level": 0.0128,
+    "dropped_chunks": 0,
     "segments": ["/Users/.../recording_20260412_143022.wav"]
   }
 
 Fields:
-  - state:            Current recording state
+  - state:            Current recording state. "stopping" means the file is
+                      being finalized (incl. normalization / MP3 conversion);
+                      wait for "idle" before downloading.
   - elapsed:          Seconds recorded (excludes paused time)
   - has_system_audio: Whether system audio capture is active
   - output_path:      Current/last file path (null when idle, no prior recording)
   - mic_level:        Real-time microphone RMS level (0.0 to ~0.5)
   - sys_level:        Real-time system audio RMS level (0.0 to ~0.5)
+  - dropped_chunks:   Audio chunks lost to writer overload (0 in normal use)
   - segments:         List of file paths (multiple if recording was auto-split)
 
 ------------------------------------------------------------------------------
@@ -181,8 +193,12 @@ Real-time event stream. Sends full status JSON every second. Sends a named
 
 No polling needed - use EventSource for push updates.
 
+EventSource cannot send an Authorization header, so /events (and only
+/events) accepts the token as a query parameter:
+
 Example:
-  const evtSource = new EventSource('http://127.0.0.1:19876/events');
+  const evtSource = new EventSource(
+    `http://127.0.0.1:19876/events?token=${encodeURIComponent(token)}`);
   evtSource.onmessage = (e) => {
     const status = JSON.parse(e.data);
     updateUI(status);
@@ -192,10 +208,13 @@ Example:
     handleStateChange(status.state);
   });
 
+(Concurrent SSE connections are capped at 16; further requests get 503.)
+
 ------------------------------------------------------------------------------
   GET /files
 ------------------------------------------------------------------------------
-List all recording files in the output directory (most recent first, max 50).
+List all recording files in the output directory, most recent first
+across all formats (wav/flac/mp3), max 50.
 
 Response 200:
   {
@@ -230,9 +249,10 @@ Example:
   POST /start
 ------------------------------------------------------------------------------
 Start a new recording. The floating widget will expand into a pill shape.
+Only allowed from the "idle" state.
 
 Response 200:  { "status": "starting" }
-Response 409:  { "error": "already recording", "state": "recording" }
+Response 409:  { "error": "requires state idle", "state": "recording" }
 
 Note: The command is dispatched asynchronously to the UI thread. Use SSE or
 poll /status to confirm the state has changed to "recording".
@@ -260,12 +280,13 @@ Response 200:  { "status": "muted" }  /  { "status": "unmuted" }
 Resume a paused recording.
 
 Response 200:  { "status": "resuming" }
-Response 409:  { "error": "not paused", "state": "recording" }
+Response 409:  { "error": "requires state paused", "state": "recording" }
 
 ------------------------------------------------------------------------------
   POST /stop
 ------------------------------------------------------------------------------
-Stop the recording and save the file. The widget shrinks back to a circle.
+Stop the recording and save the file. The widget shows a "saving" state
+and shrinks back to a circle when done.
 
 Response 200:
   {
@@ -273,12 +294,15 @@ Response 200:
     "elapsed": 45.2,
     "output_path": "/Users/.../recording_20260412_143022.wav"
   }
-Response 409:  { "error": "not recording" }
+Response 409:  { "error": "not recording", "state": "idle" }
 
-The file is finalized after the response. Wait ~500ms then check /status
-to confirm state is "idle" and the file is ready for download.
+The file is finalized after the response: /status reports "stopping"
+during finalization (including --normalize and MP3 conversion, which can
+take seconds for long recordings) and "idle" once the file is ready for
+download. Poll /status or use SSE — do not rely on a fixed delay.
 
-If format is MP3, conversion happens after stop (may take a few seconds).
+If format is MP3, output_path's extension changes from .wav to .mp3 once
+the conversion succeeds; re-read /status after reaching "idle".
 
 ------------------------------------------------------------------------------
   POST /quit
@@ -330,11 +354,10 @@ directly). All requests below send the Authorization header.
     }
 
     subscribeToEvents(onStatus, onStateChange) {
-      // EventSource cannot set custom headers — pass token as query param,
-      // or proxy through your backend. For loopback dev you can also pass
-      // ?token=... and update the server to accept it (not implemented by
-      // default for security). Easiest production setup: proxy via backend.
-      const evtSource = new EventSource(`${ORIZON_API}/events`);
+      // EventSource cannot set custom headers — /events accepts the token
+      // as a query parameter instead (loopback-only traffic).
+      const evtSource = new EventSource(
+        `${ORIZON_API}/events?token=${encodeURIComponent(this._token)}`);
       evtSource.onmessage = (e) => onStatus(JSON.parse(e.data));
       evtSource.addEventListener('statechange', (e) => {
         if (onStateChange) onStateChange(JSON.parse(e.data));
@@ -347,20 +370,33 @@ directly). All requests below send the Authorization header.
     }
   }
 
+  NOTE: the constructor must also store the raw token for SSE:
+    constructor(token) {
+      this._token = token;
+      this._headers = { 'Authorization': `Bearer ${token}` };
+    }
+
+  All methods above are INSTANCE methods (they need the token) except
+  isRunning(). Create one instance and reuse it:
+
+    const orizon = new OrizonCall(token);
+
 
 --- Real-time updates with SSE (recommended over polling) ---
 
   // Subscribe to real-time events
-  const events = OrizonCall.subscribeToEvents(
+  const events = orizon.subscribeToEvents(
     (status) => {
       // Called every second with full status
       document.getElementById('timer').textContent = formatTime(status.elapsed);
       document.getElementById('mic-level').style.width = `${status.mic_level * 300}%`;
     },
     (status) => {
-      // Called only when state changes (idle -> recording, etc.)
+      // Called only when state changes (idle -> recording -> stopping -> idle)
       if (status.state === 'recording') {
         showRecordingUI();
+      } else if (status.state === 'stopping') {
+        showSavingUI();
       } else if (status.state === 'idle') {
         showIdleUI();
       }
@@ -375,19 +411,25 @@ directly). All requests below send the Authorization header.
 
   async function recordAndUpload() {
     // Start recording
-    await OrizonCall.start();
+    await orizon.start();
 
     // ... user is in a call ...
 
     // Stop recording
-    const result = await OrizonCall.stop();
+    const result = await orizon.stop();
 
-    // Wait for file to finalize
-    await new Promise(r => setTimeout(r, 1000));
+    // Wait for finalization: poll until the recorder is idle again
+    // (MP3 conversion / normalization can take seconds on long files).
+    let status;
+    do {
+      await new Promise(r => setTimeout(r, 500));
+      status = await orizon.getStatus();
+    } while (status.state !== 'idle');
 
-    // Download the file from Orizon Call
-    const filename = result.output_path.split('/').pop();
-    const blob = await OrizonCall.downloadFile(filename);
+    // Download the file from Orizon Call (re-read the path: with MP3 the
+    // extension changes after conversion).
+    const filename = status.output_path.split('/').pop();
+    const blob = await orizon.downloadFile(filename);
 
     // Upload to your server
     const formData = new FormData();
@@ -403,7 +445,7 @@ directly). All requests below send the Authorization header.
 
   // Poll status to show elapsed time in your UI
   const timer = setInterval(async () => {
-    const status = await OrizonCall.getStatus();
+    const status = await orizon.getStatus();
     if (status.state === 'idle') {
       clearInterval(timer);
       return;
@@ -454,9 +496,9 @@ Supported formats (set with --format flag at launch):
 
   Format   Extension   Size/minute   Notes
   -------  ---------   -----------   -----
-  WAV      .wav        ~5.5 MB       Uncompressed, universal (default)
-  FLAC     .flac       ~0.7 MB       Lossless compression, 8x smaller
-  MP3      .mp3        ~1.0 MB       Lossy, requires ffmpeg installed
+  WAV      .wav        ~11.5 MB      Uncompressed (48kHz stereo 16-bit)
+  FLAC     .flac       ~1.5-4 MB     Lossless compression
+  MP3      .mp3        ~1.5 MB       Lossy (VBR q2), requires ffmpeg
 
 Location:   ~/Downloads/recording_YYYYMMDD_HHMMSS.{wav,flac,mp3}
             (can be overridden with --output-dir flag)
@@ -553,7 +595,9 @@ Linux:
   - Disk space monitoring: checked before recording starts and every 30 seconds
     during recording. Recording stops gracefully if < 100 MB free.
   - Bounded audio queues: prevent memory exhaustion during long recordings.
-    If the writer falls behind, oldest frames are dropped (max ~10s buffer).
+    If the writer falls behind (max ~10s buffered), the newest chunks are
+    dropped; every drop is counted and exposed as "dropped_chunks" in
+    /status and logged.
   - Write error handling: disk I/O errors are caught, recording stops
     gracefully, and the file is saved up to the point of failure.
   - Pre-roll (opt-in): when --preroll SECONDS > 0, the last N seconds before
@@ -569,10 +613,14 @@ Linux:
 
   - The API server binds to 127.0.0.1 ONLY (localhost). It is not accessible
     from other machines on the network.
+  - Host-header validation on every request blocks DNS-rebinding attacks
+    (a malicious page resolving its own domain to 127.0.0.1).
   - Auth: every endpoint except /health requires a Bearer token. The token is
     a fresh 256-bit value generated at startup and written to
-        ~/.orizon-call/token   (mode 0600)
-    Rotated every launch.
+        ~/.orizon-call/token   (created atomically with mode 0600)
+    Rotated every launch. Never written to the logs.
+  - GET /events additionally accepts ?token= (EventSource cannot send
+    headers); the traffic never leaves the loopback interface.
   - CORS: by default only loopback Origins are allowed. Pass --cors-origin
     https://your-app.example.com to add a specific origin. Wildcard CORS
     (`*`) is no longer used.

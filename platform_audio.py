@@ -12,6 +12,15 @@ from typing import Any, Optional, Tuple
 
 import sounddevice as sd
 
+# Virtual/loopback devices that must never be used as the "microphone":
+# picking one would record system audio onto the mic track.
+_VIRTUAL_INPUT_KEYWORDS = ('blackhole', 'soundflower', 'loopback', 'monitor')
+
+
+def _is_virtual_input(name: str) -> bool:
+    name_lower = name.lower()
+    return any(kw in name_lower for kw in _VIRTUAL_INPUT_KEYWORDS)
+
 
 def detect_mic_device() -> Tuple[Optional[int], int, float]:
     """
@@ -25,7 +34,10 @@ def detect_mic_device() -> Tuple[Optional[int], int, float]:
         default_input = sd.default.device[0]
         if default_input is not None and default_input >= 0:
             info = sd.query_devices(default_input)
-            if info['max_input_channels'] > 0:
+            # The default input can itself be a virtual/loopback device
+            # (e.g. the user routed audio through BlackHole) — skip it and
+            # fall through to the scan in that case.
+            if info['max_input_channels'] > 0 and not _is_virtual_input(info['name']):
                 return (int(default_input), info['max_input_channels'], info['default_samplerate'])
     except Exception:
         pass
@@ -34,9 +46,7 @@ def detect_mic_device() -> Tuple[Optional[int], int, float]:
     devices = sd.query_devices()
     for i, dev in enumerate(devices):
         if dev['max_input_channels'] > 0:
-            name_lower = dev['name'].lower()
-            # Skip virtual/loopback devices
-            if any(kw in name_lower for kw in ('blackhole', 'soundflower', 'loopback', 'monitor')):
+            if _is_virtual_input(dev['name']):
                 continue
             return (i, dev['max_input_channels'], dev['default_samplerate'])
 
@@ -175,15 +185,21 @@ def _detect_windows() -> Tuple[Optional[Any], Optional[int], Optional[float]]:
 
 def _detect_linux() -> Tuple[Optional[int], Optional[int], Optional[float]]:
     """Detect PulseAudio/PipeWire monitor source on Linux."""
-    # Method 1: try pulsectl for precise detection
-    monitor_name = _detect_linux_pulsectl()
+    # Method 1: pulsectl for precise detection. PortAudio exposes pulse
+    # sources under their *description* ("Monitor of Built-in Audio ..."),
+    # not their internal name ("alsa_output...monitor"), so we match on
+    # both, case-insensitively.
+    pulse_names = _detect_linux_pulsectl()
 
-    if monitor_name:
-        # Map the PulseAudio monitor source name to a sounddevice index
+    if pulse_names:
         devices = sd.query_devices()
-        for i, dev in enumerate(devices):
-            if dev['max_input_channels'] > 0 and monitor_name in dev['name']:
-                return (i, dev['max_input_channels'], dev['default_samplerate'])
+        for candidate in pulse_names:
+            cand_lower = candidate.lower()
+            for i, dev in enumerate(devices):
+                dev_lower = dev['name'].lower()
+                if dev['max_input_channels'] > 0 and (
+                        cand_lower in dev_lower or dev_lower in cand_lower):
+                    return (i, dev['max_input_channels'], dev['default_samplerate'])
 
     # Method 2: fallback - scan for any device with 'monitor' in name
     devices = sd.query_devices()
@@ -194,12 +210,14 @@ def _detect_linux() -> Tuple[Optional[int], Optional[int], Optional[float]]:
     return (None, None, None)
 
 
-def _detect_linux_pulsectl() -> Optional[str]:
-    """Use pulsectl to find the monitor source of the default sink."""
+def _detect_linux_pulsectl() -> list:
+    """Use pulsectl to find the monitor source of the default sink.
+    Returns candidate identifiers (description first, then name) for the
+    best monitor source, or an empty list."""
     try:
         import pulsectl
     except ImportError:
-        return None
+        return []
 
     try:
         with pulsectl.Pulse('orizon-call-detect') as pulse:
@@ -211,16 +229,18 @@ def _detect_linux_pulsectl() -> Optional[str]:
             sources = pulse.source_list()
             for source in sources:
                 if source.name == target_monitor:
-                    return source.name
+                    return [s for s in (getattr(source, 'description', None),
+                                        source.name) if s]
 
             # Fallback: any monitor source
             for source in sources:
                 if source.name.endswith('.monitor'):
-                    return source.name
+                    return [s for s in (getattr(source, 'description', None),
+                                        source.name) if s]
     except Exception:
         pass
 
-    return None
+    return []
 
 
 if __name__ == '__main__':

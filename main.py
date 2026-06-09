@@ -158,9 +158,17 @@ def main() -> None:
 
     setup_logging(verbose=args.verbose, quiet=args.quiet)
 
+    # PyQt6 aborts the whole process (qFatal) on unhandled Python exceptions
+    # raised inside Qt slots. Log them instead: a failed button click must
+    # never kill a recording in progress.
+    def _excepthook(exc_type, exc_value, exc_tb):
+        log.error("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
+    sys.excepthook = _excepthook
+
     from PyQt6.QtWidgets import QApplication, QMessageBox
 
-    # Single instance check (try-bind on the API port)
+    # Single instance check (try-bind on the API port). The bound socket is
+    # handed to the API server directly — no close/rebind race.
     bound_socket = _try_bind_or_explain(args.api_port)
     if bound_socket is None:
         sys.exit(1)
@@ -187,23 +195,24 @@ def main() -> None:
     recorder.set_preroll_seconds(args.preroll)
     recorder.set_auto_balance(not args.no_auto_balance)
     recorder.set_normalize_lufs(args.normalize)
+    recorder.set_system_audio_enabled(not args.no_system_audio)
 
     mic_ok, sys_ok, guidance = recorder.detect_devices()
-
-    if args.preroll > 0 and mic_ok:
-        # Start streams continuously so the last N seconds are always buffered.
-        # Note: this means the mic is "live" the whole time the app is open.
-        log.info("Pre-roll enabled (%.1fs continuous capture).", args.preroll)
-        recorder.enable_preroll_capture()
 
     if not mic_ok:
         QMessageBox.critical(
             None,
-            "Orizon Call - Error",
-            "No microphone found!\n\n"
-            "Please connect a microphone and restart the application.",
+            "Orizon Call — Errore",
+            "Nessun microfono trovato.\n\n"
+            "Collega un microfono e riavvia l'applicazione.",
         )
         sys.exit(1)
+
+    if args.preroll > 0:
+        # Start streams continuously so the last N seconds are always buffered.
+        # Note: this means the mic is "live" the whole time the app is open.
+        log.info("Pre-roll enabled (%.1fs continuous capture).", args.preroll)
+        recorder.enable_preroll_capture()
 
     # Create and show the floating widget
     widget = FloatingRecorderWidget(recorder)
@@ -219,10 +228,8 @@ def main() -> None:
 
     widget.show()
 
-    # Release the bind probe so the API server can grab the port.
-    bound_socket.close()
-
-    # Start local API server for web app integration
+    # Start local API server for web app integration, reusing the
+    # already-bound probe socket (single-instance check without TOCTOU).
     from api_server import start_api_server
     api_server = start_api_server(
         widget,
@@ -230,6 +237,7 @@ def main() -> None:
         output_dir=args.output_dir,
         cors_origin=args.cors_origin,
         require_auth=not args.no_auth,
+        bound_socket=bound_socket,
     )
 
     exit_code = app.exec()

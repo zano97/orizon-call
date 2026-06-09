@@ -211,8 +211,12 @@ final class AudioCaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             for ch in 0..<copyChannels {
                 let ab = bufList[ch]
                 guard let mData = ab.mData else { continue }
-                let chPtr = mData.bindMemory(to: Float.self, capacity: frameCount)
-                for f in 0..<frameCount {
+                // Trust the buffer's own byte size, not the header's frame
+                // count — a mismatch must clamp, never read out of bounds.
+                let availFrames = min(frameCount,
+                                      Int(ab.mDataByteSize) / MemoryLayout<Float>.size)
+                let chPtr = mData.bindMemory(to: Float.self, capacity: availFrames)
+                for f in 0..<availFrames {
                     out[f * outChannels + ch] = chPtr[f]
                 }
             }
@@ -225,16 +229,19 @@ final class AudioCaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         } else {
             // Interleaved: bufList[0].mData holds frameCount * channelCount Float32s.
             guard let mData = bufList[0].mData else { return nil }
+            let availFrames = min(frameCount,
+                                  Int(bufList[0].mDataByteSize)
+                                      / (MemoryLayout<Float>.size * channelCount))
             let srcPtr = mData.bindMemory(to: Float.self,
-                                          capacity: frameCount * channelCount)
+                                          capacity: availFrames * channelCount)
             let copyChannels = min(channelCount, outChannels)
-            for f in 0..<frameCount {
+            for f in 0..<availFrames {
                 for ch in 0..<copyChannels {
                     out[f * outChannels + ch] = srcPtr[f * channelCount + ch]
                 }
             }
             if channelCount == 1 && outChannels >= 2 {
-                for f in 0..<frameCount {
+                for f in 0..<availFrames {
                     out[f * outChannels + 1] = out[f * outChannels + 0]
                 }
             }
@@ -253,7 +260,13 @@ final class Capturer {
     private var stream: SCStream?
     private var output: AudioCaptureOutput?
     private let outputQueue = DispatchQueue(label: "orizon.audio.output")
+    // Signal handlers must NOT run on the main queue: the main thread
+    // blocks on stopSemaphore.wait() below and never services the main
+    // queue, so handlers scheduled there would never fire and every stop
+    // would escalate to SIGKILL on the Python side.
+    private let signalQueue = DispatchQueue(label: "orizon.signals")
     private let stopSemaphore = DispatchSemaphore(value: 0)
+    private var signalSources: [DispatchSourceSignal] = []
 
     func run() {
         Task {
@@ -266,21 +279,25 @@ final class Capturer {
         }
 
         // Install signal handlers so SIGINT/SIGTERM trigger a clean stop.
-        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        sigintSource.setEventHandler { [weak self] in self?.requestShutdown() }
-        sigtermSource.setEventHandler { [weak self] in self?.requestShutdown() }
-        sigintSource.resume()
-        sigtermSource.resume()
-        signal(SIGINT, SIG_IGN)
-        signal(SIGTERM, SIG_IGN)
+        for sig in [SIGINT, SIGTERM] {
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
+            source.setEventHandler { [weak self] in self?.requestShutdown() }
+            source.resume()
+            signalSources.append(source)
+            signal(sig, SIG_IGN)
+        }
         signal(SIGPIPE, SIG_IGN)
 
-        // Block until shutdown requested.
+        // Block until shutdown requested (signal, stream error, or stdout
+        // closed), then stop the capture and wait for it to finish so the
+        // process exits cleanly instead of being killed mid-teardown.
         stopSemaphore.wait()
-        Task { await self.stop() }
-        // Give stop a moment.
-        Thread.sleep(forTimeInterval: 0.3)
+        let stopDone = DispatchSemaphore(value: 0)
+        Task {
+            await self.stop()
+            stopDone.signal()
+        }
+        _ = stopDone.wait(timeout: .now() + 2.0)
     }
 
     func requestShutdown() {

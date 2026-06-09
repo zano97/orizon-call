@@ -7,5 +7,4 @@ PyAudioWPatch>=0.2.12; sys_platform == "win32"
 pulsectl>=23.5; sys_platform == "linux"
 pyobjc-framework-Cocoa>=9.0; sys_platform == "darwin"
 
-# Dev/test only (install with: pip install -r requirements.txt pytest)
-# pytest>=7
+# Dev/test: pip install -r requirements-dev.txt

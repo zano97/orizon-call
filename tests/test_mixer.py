@@ -35,7 +35,7 @@ def _sys_chunk(n: int = 1024, l: float = 0.5, r: float = -0.5) -> np.ndarray:
     return arr
 
 
-# ---------- Dual-track mode (default) ----------
+# ---------- Dual-track mode (opt-in via --dual-track) ----------
 
 class TestDualTrack:
 
@@ -82,7 +82,7 @@ class TestDualTrack:
         assert np.all(out == 0)
 
 
-# ---------- Mix mode (legacy) ----------
+# ---------- Mix mode (default) ----------
 
 class TestMixMode:
 

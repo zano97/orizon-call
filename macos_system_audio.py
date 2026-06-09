@@ -217,8 +217,9 @@ class SCKAudioSource:
                 if text.startswith("STATUS "):
                     self._handle_status(text[len("STATUS "):])
                 else:
-                    # Unstructured stderr noise — surface for diagnostics.
-                    self._report_error(f"helper: {text}")
+                    # Unstructured stderr noise (frameworks, os_log spill):
+                    # diagnostics only — never a user-facing error.
+                    log.debug("helper stderr: %s", text)
         except Exception:
             pass
 
@@ -245,8 +246,13 @@ class SCKAudioSource:
             # Heartbeat at peak=0.0000 means SCK is delivering buffers but they
             # are silent (audio is muted, or routed somewhere SCK can't see).
             log.info("SCK %s: %s", key, rest)
-        elif key == "source_format":
+        elif key in ("source_format", "decoded_format"):
             log.info("SCK source format: %s", rest)
+            # The helper promises 48 kHz output; warn loudly if the decoded
+            # source ever disagrees so a pitch/speed bug is diagnosable.
+            for part in rest.split():
+                if part.startswith("sr=") and part[3:] != str(SAMPLE_RATE):
+                    log.warning("SCK source rate %s != expected %d", part[3:], SAMPLE_RATE)
         elif key == "stopped":
             log.info("SCK stopped: %s", rest)
         else:
