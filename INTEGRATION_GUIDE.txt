@@ -1,0 +1,602 @@
+================================================================================
+  ORIZON CALL - WEB APP INTEGRATION GUIDE
+================================================================================
+
+Orizon Call is a desktop floating audio recorder that captures both microphone
+input and system audio output (calls, videos, music). It exposes a local REST
+API on the user's machine that your web app can call to control recordings.
+
+
+================================================================================
+  1. ARCHITECTURE OVERVIEW
+================================================================================
+
+  +---------------------+        HTTP (localhost)        +------------------+
+  |    Your Web App     |  <-------------------------->  |   Orizon Call     |
+  |  (browser, any      |   fetch("http://127.0.0.1:    |   (desktop app)   |
+  |   origin/domain)    |         19876/...")            |                   |
+  +---------------------+                               +------------------+
+        |                                                 |  Floating widget
+        |  EventSource("/events")                         |  Mic + system audio
+        +--- SSE real-time updates <---                   |  WAV/FLAC/MP3 output
+                                                          +-> ~/Downloads/
+
+The desktop app runs independently. It stays as a floating overlay on top of
+ALL windows (browsers, call apps, everything). Your web app communicates with
+it via localhost HTTP calls.
+
+SECURITY MODEL (changed):
+  * The API binds only to 127.0.0.1 (loopback). Never reachable from LAN.
+  * Every protected endpoint requires the header
+        Authorization: Bearer <token>
+    where <token> is a fresh random value generated at startup and written to
+        ~/.orizon-call/token         (POSIX, mode 0600)
+        %USERPROFILE%\.orizon-call\token   (Windows)
+    The web app reads that file (same machine) and includes the header in
+    every request. Only /health and CORS preflight (OPTIONS) are public.
+  * CORS: by default only loopback Origins (http://localhost:*, 127.0.0.1, ::1)
+    are allowed. To allow a specific web-app origin, launch with
+        python3 main.py --cors-origin https://app.example.com
+    Wildcard CORS (`*`) is no longer used: combined with the localhost listener
+    and an attacker-controlled tab it was a CSRF + exfiltration vector.
+  * --no-auth disables the token check (NOT recommended, useful for local dev).
+
+Single-instance enforcement: the launcher tries to bind 127.0.0.1:<port>
+before starting. If the bind fails it probes the port — if /health answers,
+it's another Orizon Call instance; otherwise an unrelated service. Either
+way the second launcher exits with a clear log message.
+
+
+================================================================================
+  2. PREREQUISITES
+================================================================================
+
+The user must have the Orizon Call desktop app running before the web app can
+control it. Required on the user's machine:
+
+  - Python 3.10+
+  - pip install -r requirements.txt
+
+Dependencies installed automatically per platform:
+  - PyQt6           (GUI - all platforms)
+  - sounddevice     (audio capture - all platforms)
+  - soundfile       (WAV/FLAC output - all platforms)
+  - numpy           (audio mixing - all platforms)
+  - soxr            (high-quality resampling - all platforms)
+  - PyAudioWPatch   (Windows only - system audio via WASAPI loopback)
+  - pulsectl        (Linux only - PulseAudio/PipeWire monitor sources)
+  - pyobjc-framework-Cocoa  (macOS only - dock hiding, floating window)
+
+System audio capture (the voice of the other call participants):
+  - macOS 13+:  uses the bundled Swift ScreenCaptureKit helper at
+                helpers/system_audio_capture. NO BlackHole or other virtual
+                audio device needs to be installed. The user grants the
+                "Screen Recording" permission once (System Settings → Privacy
+                & Security → Screen Recording → enable Terminal / the .app).
+                Works with any output device — headphones, AirPods, speakers.
+                Fallback: macOS 12 and older still need BlackHole.
+  - Windows:    WASAPI loopback. Works out of the box, any output device.
+  - Linux:      PulseAudio/PipeWire monitor source. Works out of the box.
+
+If the helper binary is missing (e.g. you clone the repo on a new machine),
+build it once with:
+    cd helpers && ./build.sh        # requires Xcode Command Line Tools
+
+For MP3 output, ffmpeg must be installed on the system:
+  macOS:   brew install ffmpeg
+  Windows: winget install ffmpeg
+  Linux:   sudo apt install ffmpeg
+
+
+================================================================================
+  3. LAUNCHING THE APP
+================================================================================
+
+  python main.py
+
+Optional flags:
+  --api-port 19876       Change the API port (default: 19876)
+  --output-dir /path     Override output directory (default: ~/Downloads)
+  --format wav|flac|mp3  Output format (default: wav). FLAC is lossless 8x smaller.
+  --no-system-audio      Record microphone only
+  --dual-track           Output stereo file with L=mic, R=system audio.
+                         Default: single combined mix where both channels
+                         carry both voices (natural playback, one file).
+  --no-auto-balance      Disable real-time per-source gain matching.
+                         Default: ON — keeps mic and system audio at similar
+                         loudness so neither overpowers the other in the mix.
+  --normalize [LUFS]     After stop, normalize the file to the given LUFS
+                         target via ffmpeg loudnorm (default: -16 = podcast).
+                         Falls back to peak normalize if ffmpeg is missing.
+  --preroll SECONDS      Pre-roll buffer (default: 0 = off). Captures audio
+                         continuously while idle so the start of a recording
+                         isn't missed. Privacy: mic is "live" the whole session.
+  --cors-origin ORIGIN   Allow a specific web-app origin (default: only loopback).
+  --no-auth              Disable bearer-token auth on the API (dev only).
+  --verbose / --quiet    Log level for console output.
+
+The app will:
+  1. Try to bind 127.0.0.1:<api-port>; if taken, exit with a clear message.
+  2. Show a floating dark circle with a green logo (bottom-right of screen).
+  3. Generate a fresh auth token and write it to ~/.orizon-call/token (0600).
+  4. Start the REST API server on http://127.0.0.1:<api-port>.
+  5. Log "API listening on http://127.0.0.1:<api-port>" (also to
+     ~/.orizon-call/logs/orizon.log — rotated, 3 backups, 1 MB each).
+
+The widget appears on whichever monitor the mouse cursor is on (multi-monitor).
+
+
+================================================================================
+  4. REST API REFERENCE
+================================================================================
+
+Base URL: http://127.0.0.1:19876
+All responses are JSON. Threaded server supports concurrent SSE connections
+alongside normal API calls.
+
+Auth: every request except GET /health and OPTIONS must include
+        Authorization: Bearer <token>
+where <token> is the contents of ~/.orizon-call/token (one line, no spaces).
+Missing → 401, wrong → 403. The token rotates every time the app starts.
+
+------------------------------------------------------------------------------
+  GET /health           (no auth required)
+------------------------------------------------------------------------------
+Check if the app is running.
+
+Response 200:
+  { "ok": true }
+
+------------------------------------------------------------------------------
+  GET /status
+------------------------------------------------------------------------------
+Get current recorder state, audio levels, and file info.
+
+Response 200:
+  {
+    "state": "idle" | "recording" | "paused",
+    "elapsed": 12.5,
+    "has_system_audio": true,
+    "output_path": "/Users/.../recording_20260412_143022.wav",
+    "muted": false,
+    "mic_level": 0.0342,
+    "sys_level": 0.0128,
+    "segments": ["/Users/.../recording_20260412_143022.wav"]
+  }
+
+Fields:
+  - state:            Current recording state
+  - elapsed:          Seconds recorded (excludes paused time)
+  - has_system_audio: Whether system audio capture is active
+  - output_path:      Current/last file path (null when idle, no prior recording)
+  - mic_level:        Real-time microphone RMS level (0.0 to ~0.5)
+  - sys_level:        Real-time system audio RMS level (0.0 to ~0.5)
+  - segments:         List of file paths (multiple if recording was auto-split)
+
+------------------------------------------------------------------------------
+  GET /events  (Server-Sent Events)
+------------------------------------------------------------------------------
+Real-time event stream. Sends full status JSON every second. Sends a named
+"statechange" event whenever the state transitions.
+
+No polling needed - use EventSource for push updates.
+
+Example:
+  const evtSource = new EventSource('http://127.0.0.1:19876/events');
+  evtSource.onmessage = (e) => {
+    const status = JSON.parse(e.data);
+    updateUI(status);
+  };
+  evtSource.addEventListener('statechange', (e) => {
+    const status = JSON.parse(e.data);
+    handleStateChange(status.state);
+  });
+
+------------------------------------------------------------------------------
+  GET /files
+------------------------------------------------------------------------------
+List all recording files in the output directory (most recent first, max 50).
+
+Response 200:
+  {
+    "files": [
+      {
+        "name": "recording_20260412_143022.wav",
+        "size": 5242880,
+        "modified": 1712937022.5,
+        "path": "/Users/.../Downloads/recording_20260412_143022.wav"
+      }
+    ]
+  }
+
+------------------------------------------------------------------------------
+  GET /files/<filename>
+------------------------------------------------------------------------------
+Download a recording file. Returns the raw audio file with appropriate headers.
+
+Response headers:
+  Content-Type: audio/wav | audio/flac | audio/mpeg
+  Content-Disposition: attachment; filename="recording_20260412_143022.wav"
+
+Security: only files starting with "recording_" are served. Path traversal is
+blocked (no slashes or ".." allowed in filename).
+
+Example:
+  const res = await fetch('http://127.0.0.1:19876/files/recording_20260412_143022.wav');
+  const blob = await res.blob();
+  // Upload blob to your server, or create a download link
+
+------------------------------------------------------------------------------
+  POST /start
+------------------------------------------------------------------------------
+Start a new recording. The floating widget will expand into a pill shape.
+
+Response 200:  { "status": "starting" }
+Response 409:  { "error": "already recording", "state": "recording" }
+
+Note: The command is dispatched asynchronously to the UI thread. Use SSE or
+poll /status to confirm the state has changed to "recording".
+
+------------------------------------------------------------------------------
+  POST /pause
+------------------------------------------------------------------------------
+Pause the current recording. Timer stops, audio is not captured.
+
+Response 200:  { "status": "pausing" }
+Response 409:  { "error": "requires state recording", "state": "idle" }
+
+------------------------------------------------------------------------------
+  POST /mute        POST /unmute
+------------------------------------------------------------------------------
+Mute or unmute the microphone WITHOUT pausing the recording — system audio
+continues to be captured. The mic channel writes silence while muted.
+The widget's mic button reflects the state.
+
+Response 200:  { "status": "muted" }  /  { "status": "unmuted" }
+
+------------------------------------------------------------------------------
+  POST /resume
+------------------------------------------------------------------------------
+Resume a paused recording.
+
+Response 200:  { "status": "resuming" }
+Response 409:  { "error": "not paused", "state": "recording" }
+
+------------------------------------------------------------------------------
+  POST /stop
+------------------------------------------------------------------------------
+Stop the recording and save the file. The widget shrinks back to a circle.
+
+Response 200:
+  {
+    "status": "stopping",
+    "elapsed": 45.2,
+    "output_path": "/Users/.../recording_20260412_143022.wav"
+  }
+Response 409:  { "error": "not recording" }
+
+The file is finalized after the response. Wait ~500ms then check /status
+to confirm state is "idle" and the file is ready for download.
+
+If format is MP3, conversion happens after stop (may take a few seconds).
+
+------------------------------------------------------------------------------
+  POST /quit
+------------------------------------------------------------------------------
+Quit the Orizon Call app entirely. If recording, it will stop and save first.
+
+Response 200:  { "status": "quitting" }
+
+
+================================================================================
+  5. JAVASCRIPT INTEGRATION EXAMPLES
+================================================================================
+
+--- Helper class (complete, production-ready) ---
+
+The web app must read the bearer token from ~/.orizon-call/token (loaded once,
+via a small backend or an Electron preload — browsers can't read files
+directly). All requests below send the Authorization header.
+
+  const ORIZON_API = 'http://127.0.0.1:19876';
+
+  class OrizonCall {
+    constructor(token) {
+      this._headers = { 'Authorization': `Bearer ${token}` };
+    }
+
+    async _get(path)  { return fetch(`${ORIZON_API}${path}`, { headers: this._headers }); }
+    async _post(path) { return fetch(`${ORIZON_API}${path}`, { method: 'POST', headers: this._headers }); }
+
+    static async isRunning() {
+      // /health does not require auth — good for liveness probes.
+      try { return (await fetch(`${ORIZON_API}/health`)).ok; }
+      catch { return false; }
+    }
+
+    async getStatus()      { return (await this._get('/status')).json(); }
+    async start()          { return (await this._post('/start')).json(); }
+    async stop()           { return (await this._post('/stop')).json(); }
+    async pause()          { return (await this._post('/pause')).json(); }
+    async resume()         { return (await this._post('/resume')).json(); }
+    async mute()           { return (await this._post('/mute')).json(); }
+    async unmute()         { return (await this._post('/unmute')).json(); }
+    async quit()           { return (await this._post('/quit')).json(); }
+    async listFiles()      { return (await this._get('/files')).json(); }
+
+    async downloadFile(filename) {
+      const res = await this._get(`/files/${encodeURIComponent(filename)}`);
+      return res.blob();
+    }
+
+    subscribeToEvents(onStatus, onStateChange) {
+      // EventSource cannot set custom headers — pass token as query param,
+      // or proxy through your backend. For loopback dev you can also pass
+      // ?token=... and update the server to accept it (not implemented by
+      // default for security). Easiest production setup: proxy via backend.
+      const evtSource = new EventSource(`${ORIZON_API}/events`);
+      evtSource.onmessage = (e) => onStatus(JSON.parse(e.data));
+      evtSource.addEventListener('statechange', (e) => {
+        if (onStateChange) onStateChange(JSON.parse(e.data));
+      });
+      evtSource.onerror = () => {
+        // Connection lost - app may have quit
+        evtSource.close();
+      };
+      return evtSource; // Call .close() to unsubscribe
+    }
+  }
+
+
+--- Real-time updates with SSE (recommended over polling) ---
+
+  // Subscribe to real-time events
+  const events = OrizonCall.subscribeToEvents(
+    (status) => {
+      // Called every second with full status
+      document.getElementById('timer').textContent = formatTime(status.elapsed);
+      document.getElementById('mic-level').style.width = `${status.mic_level * 300}%`;
+    },
+    (status) => {
+      // Called only when state changes (idle -> recording, etc.)
+      if (status.state === 'recording') {
+        showRecordingUI();
+      } else if (status.state === 'idle') {
+        showIdleUI();
+      }
+    }
+  );
+
+  // Later: stop listening
+  events.close();
+
+
+--- Record and upload to your server ---
+
+  async function recordAndUpload() {
+    // Start recording
+    await OrizonCall.start();
+
+    // ... user is in a call ...
+
+    // Stop recording
+    const result = await OrizonCall.stop();
+
+    // Wait for file to finalize
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Download the file from Orizon Call
+    const filename = result.output_path.split('/').pop();
+    const blob = await OrizonCall.downloadFile(filename);
+
+    // Upload to your server
+    const formData = new FormData();
+    formData.append('audio', blob, filename);
+    await fetch('https://your-api.com/upload', {
+      method: 'POST',
+      body: formData
+    });
+  }
+
+
+--- Polling fallback (if SSE is not suitable) ---
+
+  // Poll status to show elapsed time in your UI
+  const timer = setInterval(async () => {
+    const status = await OrizonCall.getStatus();
+    if (status.state === 'idle') {
+      clearInterval(timer);
+      return;
+    }
+    updateTimerDisplay(status.elapsed);
+    updateMicLevel(status.mic_level);
+  }, 1000);
+
+
+================================================================================
+  6. ERROR HANDLING
+================================================================================
+
+HTTP Status Codes:
+  200  Success
+  204  CORS preflight OK (OPTIONS)
+  400  Bad request (invalid filename)
+  403  Forbidden (file access denied - not a recording file)
+  404  Not found (unknown endpoint or file)
+  409  Conflict (wrong state for the requested action)
+  503  Recorder not ready (app still initializing)
+
+Connection refused (fetch throws TypeError/NetworkError):
+  The desktop app is not running. Show the user a message to start it.
+
+Recommended pattern:
+
+  async function safeCall(fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof TypeError) {
+        showNotification('Please start Orizon Call on your desktop');
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  const status = await safeCall(() => OrizonCall.getStatus());
+
+
+================================================================================
+  7. OUTPUT FILES
+================================================================================
+
+Supported formats (set with --format flag at launch):
+
+  Format   Extension   Size/minute   Notes
+  -------  ---------   -----------   -----
+  WAV      .wav        ~5.5 MB       Uncompressed, universal (default)
+  FLAC     .flac       ~0.7 MB       Lossless compression, 8x smaller
+  MP3      .mp3        ~1.0 MB       Lossy, requires ffmpeg installed
+
+Location:   ~/Downloads/recording_YYYYMMDD_HHMMSS.{wav,flac,mp3}
+            (can be overridden with --output-dir flag)
+
+CHANNEL LAYOUT:
+  - Default: ONE stereo file where both channels carry mic + system audio
+    mixed 50/50. Natural playback: both voices come out of both ears.
+  - With --dual-track: ONE stereo file with Left = microphone (you),
+    Right = system audio (others, downmixed to mono). Useful for feeding
+    each speaker to transcription separately.
+  - Mic-only fallback: mic duplicated onto both channels.
+  - System-only: true system stereo preserved.
+
+Output is always a single file (per segment — see splitting below).
+
+Long recordings: files are automatically split at ~5 hours to avoid the
+4 GB WAV file size limit. Segments are named:
+  recording_20260412_143022.wav          (first segment)
+  recording_20260412_143022_part2.wav    (second segment)
+  recording_20260412_143022_part3.wav    (third segment, etc.)
+
+The /status endpoint returns all segment paths in the "segments" array.
+The /files endpoint lists all recording files for download.
+
+METADATA:
+  - WAV files get a sidecar JSON: recording_xxx.wav.json with software,
+    recorded_at, sample_rate, channels, dual_track, channel_map,
+    duration_seconds, and segments[].
+  - FLAC files embed title/software/date/comment tags via libsndfile.
+  - MP3 files get ID3 tags written by ffmpeg at conversion time.
+
+Audio spec: 48 kHz sample rate, stereo, 16-bit PCM. Resampling (when the
+device runs at a different rate) uses soxr in "HQ" mode for clean output.
+
+AUDIO PROCESSING:
+  - Auto-balance (default ON): each source (mic, system) gets a slow-attack
+    RMS-smoothed gain applied before mixing, so a quiet mic isn't drowned
+    by loud call audio (or vice versa). Targets ~-18 dBFS RMS per source.
+    Capped at +15 dB amplification. Skips silent blocks to avoid pumping
+    noise. Disable with --no-auto-balance for raw output.
+  - Loudness normalization (opt-in): with --normalize [LUFS], after stop
+    the file is run through ffmpeg's `loudnorm` filter (EBU R128). Default
+    target -16 LUFS (podcast). Falls back to peak normalize at -1 dBFS if
+    ffmpeg isn't installed. Useful for keeping multiple recordings at the
+    same perceived loudness.
+
+
+================================================================================
+  8. PLATFORM NOTES
+================================================================================
+
+macOS (13+):
+  - System audio is captured via the bundled Swift ScreenCaptureKit helper
+    (helpers/system_audio_capture). NO BlackHole or audio routing changes.
+  - User grants "Screen Recording" permission once to the parent app
+    (Terminal, iTerm, or the eventual .app bundle).
+  - Microphone permission is requested by macOS on first launch.
+  - Works with any output device: speakers, AirPods, USB headset, HDMI.
+  - The app hides from the Dock automatically (no Python icon).
+  - The floating widget stays above ALL windows (NSFloatingWindowLevel),
+    appears on all Spaces and alongside fullscreen apps.
+  - Multi-monitor: widget appears on the screen where the cursor is.
+
+macOS (12 and older):
+  - Fallback to BlackHole detection if the SCK helper isn't available.
+
+Windows:
+  - System audio capture works automatically via WASAPI loopback
+  - The app hides from the taskbar
+  - No additional setup needed
+
+Linux:
+  - System audio capture works via PulseAudio/PipeWire monitor sources
+  - Requires a running PulseAudio or PipeWire server (standard on modern distros)
+  - The app hides from the taskbar
+  - Wayland: widget uses periodic raise() to stay on top (workaround)
+  - X11: WindowStaysOnTopHint works natively
+
+
+================================================================================
+  9. RELIABILITY & CRASH RECOVERY
+================================================================================
+
+  - Auto-save on crash: SIGTERM/SIGINT/SIGHUP/SIGBREAK (cross-platform) and
+    atexit hooks finalize the WAV/FLAC header so partial recordings are
+    playable. The output file is closed BEFORE the streams to ensure the
+    header rewrite isn't skipped.
+  - Watchdog thread (runs every 2s during recording):
+      * if the writer thread dies → emergency save
+      * if the mic stream goes inactive (e.g. user unplugs headphones) →
+        re-detect default mic and reopen the stream (3 attempts, backoff)
+      * if the macOS SCK helper subprocess exits → restart (3 attempts)
+      * if the WASAPI reader thread dies → restart
+  - Disk space monitoring: checked before recording starts and every 30 seconds
+    during recording. Recording stops gracefully if < 100 MB free.
+  - Bounded audio queues: prevent memory exhaustion during long recordings.
+    If the writer falls behind, oldest frames are dropped (max ~10s buffer).
+  - Write error handling: disk I/O errors are caught, recording stops
+    gracefully, and the file is saved up to the point of failure.
+  - Pre-roll (opt-in): when --preroll SECONDS > 0, the last N seconds before
+    /start are prepended to the recording so the first words aren't lost.
+  - Single instance: bind-based check on the API port. If something else
+    holds the port, the launcher probes /health to tell "another Orizon
+    Call" from "unrelated service" before reporting an error.
+
+
+================================================================================
+  10. SECURITY NOTES
+================================================================================
+
+  - The API server binds to 127.0.0.1 ONLY (localhost). It is not accessible
+    from other machines on the network.
+  - Auth: every endpoint except /health requires a Bearer token. The token is
+    a fresh 256-bit value generated at startup and written to
+        ~/.orizon-call/token   (mode 0600)
+    Rotated every launch.
+  - CORS: by default only loopback Origins are allowed. Pass --cors-origin
+    https://your-app.example.com to add a specific origin. Wildcard CORS
+    (`*`) is no longer used.
+  - --no-auth disables the token check (useful for local development only).
+  - File download (/files/<name>) only serves files starting with "recording_".
+    Path traversal attacks are blocked (no slashes or ".." in filename).
+  - Recordings are saved locally. The web app can download them via the /files
+    endpoint and upload them to your server.
+
+
+================================================================================
+  11. QUICK START CHECKLIST
+================================================================================
+
+  [ ] User installs Python 3.10+ and runs: pip install -r requirements.txt
+  [ ] (macOS only) User grants "Screen Recording" permission to the parent
+      app on first launch (System Settings → Privacy & Security →
+      Screen Recording). No BlackHole or virtual device required.
+  [ ] Web app reads the bearer token from ~/.orizon-call/token and includes
+      "Authorization: Bearer <token>" on every API call.
+  [ ] (MP3 only) User installs ffmpeg
+  [ ] User starts the app: python main.py [--format flac]
+  [ ] Web app checks connectivity: GET /health
+  [ ] Web app subscribes to events: new EventSource('/events')
+  [ ] Web app controls recording: POST /start, /stop, /pause, /resume
+  [ ] Web app downloads files: GET /files/<name> -> blob -> upload to server
+  [ ] Recording files appear in ~/Downloads as .wav/.flac/.mp3 files
