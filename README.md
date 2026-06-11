@@ -27,21 +27,37 @@ REST API locale per il controllo dalla web app.
   log), validazione Host anti DNS-rebinding, CORS ristretto, SSE per gli
   aggiornamenti in tempo reale.
 
+## Avvio rapido (un solo comando)
+
+```bash
+./start.sh
+```
+
+Al **primo avvio** lo script fa tutto da solo: crea l'ambiente Python
+(`.venv`), installa le dipendenze e compila l'helper audio di sistema se
+manca. Dai successivi avvii parte direttamente. In alternativa, doppio
+click su **"Avvia Orizon Call.command"** dal Finder.
+
+Le opzioni passano all'app:
+
+```bash
+./start.sh --format flac   # FLAC lossless
+./start.sh --dual-track    # L=mic, R=sistema (per trascrizione)
+./start.sh --help          # tutte le opzioni
+```
+
 ## Requisiti
 
-- Python 3.10+
-- `pip install -r requirements.txt`
+- Python 3.10+ (tutto il resto lo installa `start.sh`)
 - macOS: permesso "Registrazione schermo" per l'app che lancia Orizon
   Call (Terminale/iTerm o il bundle .app) — richiesto una sola volta.
 - MP3 e normalizzazione loudness richiedono `ffmpeg` (`brew install ffmpeg`).
 
-## Avvio
+## Avvio manuale (senza script)
 
 ```bash
+pip install -r requirements.txt
 python3 main.py                 # WAV in ~/Downloads, API su :19876
-python3 main.py --format flac   # FLAC lossless
-python3 main.py --dual-track    # L=mic, R=sistema (per trascrizione)
-python3 main.py --help          # tutte le opzioni
 ```
 
 ## Helper audio di sistema (macOS)
