@@ -262,3 +262,23 @@ class TestFiles:
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
             assert resp.read() == b"RIFFdata"
+
+
+class TestServerLifecycle:
+    def test_start_api_server_bind_error(self, monkeypatch, tmp_path):
+        import api_server
+        import logging
+        from unittest.mock import MagicMock
+
+        def mock_server(*args, **kwargs):
+            raise OSError("Address already in use")
+
+        monkeypatch.setattr(api_server, "ThreadedHTTPServer", mock_server)
+        mock_logger = MagicMock()
+        monkeypatch.setattr(api_server, "log", mock_logger)
+
+        widget = FakeWidget()
+        server = api_server.start_api_server(widget, port=12345, output_dir=tmp_path)
+
+        assert server is None
+        mock_logger.error.assert_called_once()
