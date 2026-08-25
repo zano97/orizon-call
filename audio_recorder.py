@@ -162,11 +162,21 @@ class AudioRecorder:
     """
 
     def __init__(self) -> None:
+        self._init_state()
+        self._init_streams()
+        self._init_queues_and_threads()
+        self._init_timing_and_output()
+        self._init_devices_and_levels()
+        self._init_settings_and_processing()
+        self._init_crash_recovery()
+
+    def _init_state(self) -> None:
         self._state = RecordingState.IDLE
         self._lock = threading.Lock()
         # Serializes watchdog recovery against stop()/teardown.
         self._recovery_lock = threading.Lock()
 
+    def _init_streams(self) -> None:
         # Streams
         self._mic_stream: Optional[sd.InputStream] = None
         self._sys_stream: Optional[sd.InputStream] = None
@@ -175,6 +185,7 @@ class AudioRecorder:
         self._pyaudio_instance: Any = None
         self._sck_source: Any = None
 
+    def _init_queues_and_threads(self) -> None:
         # Per-session queues of (chunk, native_rate) tuples. Recreated on
         # every start() so a zombie writer from a stuck previous session
         # can never consume the new session's audio.
@@ -191,6 +202,7 @@ class AudioRecorder:
         self._finalizing = False  # True while stop()/emergency save finalizes
         self._zombie_writer: Optional[threading.Thread] = None  # stuck writer
 
+    def _init_timing_and_output(self) -> None:
         # Timing
         self._elapsed_seconds: float = 0.0
         self._recording_start_time: Optional[float] = None
@@ -203,6 +215,7 @@ class AudioRecorder:
         self._segment_index: int = 0
         self._samples_in_segment: int = 0
 
+    def _init_devices_and_levels(self) -> None:
         # Devices
         self._mic_device: Optional[int] = None
         self._mic_channels: int = 1
@@ -224,6 +237,7 @@ class AudioRecorder:
         # Error reporting
         self._error_callback: Optional[Callable[[str], None]] = None
 
+    def _init_settings_and_processing(self) -> None:
         # Runtime toggles
         self._mic_muted: bool = False
         # True (default) = single combined stereo file where both channels
@@ -254,6 +268,7 @@ class AudioRecorder:
         self._sys_ring: Deque[Tuple[np.ndarray, float]] = collections.deque()
         self._ring_lock = threading.Lock()
 
+    def _init_crash_recovery(self) -> None:
         # Crash recovery — install handlers for the signals we can on this
         # platform. On Windows SIGTERM doesn't exist, but SIGBREAK (Ctrl+Break)
         # and SIGINT (Ctrl+C) do; on POSIX we cover SIGTERM and SIGHUP too.
