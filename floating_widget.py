@@ -1089,7 +1089,7 @@ class FloatingRecorderWidget(QWidget):
                     return
             # State may have changed while the dialog was open (API stop):
             # _handle_stop handles every case, including quitting directly
-            # if the recorder is already idle.
+            # when the recorder is already idle.
             self._handle_stop(quit_after=True)
         else:
             QApplication.quit()
