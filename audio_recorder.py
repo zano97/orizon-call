@@ -164,6 +164,7 @@ class AudioRecorder:
     def __init__(self) -> None:
         self._state = RecordingState.IDLE
         self._lock = threading.Lock()
+        self._state_cv = threading.Condition()
         # Serializes watchdog recovery against stop()/teardown.
         self._recovery_lock = threading.Lock()
 
@@ -294,7 +295,11 @@ class AudioRecorder:
         self._preroll_seconds = max(0.0, float(seconds))
 
     def set_mic_muted(self, muted: bool) -> None:
-        self._mic_muted = bool(muted)
+        new_muted = bool(muted)
+        if self._mic_muted != new_muted:
+            self._mic_muted = new_muted
+            with self._state_cv:
+                self._state_cv.notify_all()
 
     def set_system_audio_enabled(self, enabled: bool) -> None:
         """Disable to record microphone only (--no-system-audio)."""
@@ -360,6 +365,16 @@ class AudioRecorder:
     @property
     def state(self) -> RecordingState:
         return self._state
+
+    def wait_for_state_change(self, timeout: float = 1.0) -> None:
+        with self._state_cv:
+            self._state_cv.wait(timeout)
+
+    def _set_state(self, new_state: RecordingState) -> None:
+        if self._state != new_state:
+            self._state = new_state
+            with self._state_cv:
+                self._state_cv.notify_all()
 
     @property
     def elapsed_time(self) -> float:
@@ -470,7 +485,7 @@ class AudioRecorder:
                     mic_prelude = []
                     sys_prelude = []
                 self._recording_start_time = time.monotonic()
-                self._state = RecordingState.RECORDING
+                self._set_state(RecordingState.RECORDING)
 
             stop_event = self._stop_event
             self._writer_thread = threading.Thread(
@@ -498,7 +513,7 @@ class AudioRecorder:
                 self._elapsed_seconds += time.monotonic() - self._recording_start_time
                 self._recording_start_time = None
             self._pause_event.clear()
-            self._state = RecordingState.PAUSED
+            self._set_state(RecordingState.PAUSED)
 
     def resume(self) -> None:
         with self._lock:
@@ -508,7 +523,7 @@ class AudioRecorder:
             self._drain_queue(self._sys_queue)
             self._recording_start_time = time.monotonic()
             self._pause_event.set()
-            self._state = RecordingState.RECORDING
+            self._set_state(RecordingState.RECORDING)
 
     def stop(self) -> Optional[Path]:
         """
@@ -523,7 +538,7 @@ class AudioRecorder:
             if self._state == RecordingState.RECORDING and self._recording_start_time is not None:
                 self._elapsed_seconds += time.monotonic() - self._recording_start_time
                 self._recording_start_time = None
-            self._state = RecordingState.STOPPING
+            self._set_state(RecordingState.STOPPING)
             self._finalizing = True
             stop_event = self._stop_event
             self._pause_event.set()
@@ -576,7 +591,7 @@ class AudioRecorder:
                 self._convert_to_mp3()
 
         with self._lock:
-            self._state = RecordingState.IDLE
+            self._set_state(RecordingState.IDLE)
             self._finalizing = False
 
         return self._output_path
@@ -1169,7 +1184,7 @@ class AudioRecorder:
             if self._state != RecordingState.IDLE:
                 self._elapsed_seconds = self.elapsed_time
                 self._recording_start_time = None
-                self._state = RecordingState.IDLE
+                self._set_state(RecordingState.IDLE)
         finally:
             if acquired:
                 self._lock.release()
@@ -1314,7 +1329,7 @@ class AudioRecorder:
             if self._state != RecordingState.IDLE:
                 self._elapsed_seconds = self.elapsed_time
                 self._recording_start_time = None
-                self._state = RecordingState.IDLE
+                self._set_state(RecordingState.IDLE)
         finally:
             if acquired:
                 self._lock.release()
@@ -1453,7 +1468,7 @@ class AudioRecorder:
         # thread, which may already hold self._lock (it is not reentrant).
         acquired = self._lock.acquire(timeout=1.0)
         try:
-            self._state = RecordingState.IDLE
+            self._set_state(RecordingState.IDLE)
         finally:
             if acquired:
                 self._lock.release()

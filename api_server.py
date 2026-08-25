@@ -350,7 +350,7 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
                         self.wfile.write(f"event: statechange\ndata: {data_line}\n\n".encode())
                     last_state = current_state
                     self.wfile.flush()
-                    time.sleep(1)
+                    w.wait_for_status_change(timeout=1.0)
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     break
         finally:
