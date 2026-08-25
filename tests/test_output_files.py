@@ -127,3 +127,35 @@ class TestCrashConsistentHeader:
 
         recorder._output_file.close()
         recorder._output_file = None
+
+class TestDiskSpace:
+
+    def test_check_disk_space_low_raises_error(self, recorder, monkeypatch):
+        # Mock shutil.disk_usage to return low free space
+        from collections import namedtuple
+        Usage = namedtuple('Usage', ['total', 'used', 'free'])
+
+        # Less than MIN_DISK_SPACE_BYTES (100 * 1024 * 1024)
+        mock_usage = Usage(total=200000000, used=150000000, free=50000000)
+        monkeypatch.setattr("audio_recorder.shutil.disk_usage", lambda path: mock_usage)
+
+        with pytest.raises(RuntimeError, match="Low disk space"):
+            recorder._check_disk_space(raise_on_low=True)
+
+    def test_check_disk_space_low_returns_false(self, recorder, monkeypatch):
+        from collections import namedtuple
+        Usage = namedtuple('Usage', ['total', 'used', 'free'])
+        mock_usage = Usage(total=200000000, used=150000000, free=50000000)
+        monkeypatch.setattr("audio_recorder.shutil.disk_usage", lambda path: mock_usage)
+
+        # Without raise_on_low=True, it should just return False
+        assert recorder._check_disk_space(raise_on_low=False) is False
+
+    def test_check_disk_space_adequate(self, recorder, monkeypatch):
+        from collections import namedtuple
+        Usage = namedtuple('Usage', ['total', 'used', 'free'])
+        mock_usage = Usage(total=500000000, used=150000000, free=350000000)
+        monkeypatch.setattr("audio_recorder.shutil.disk_usage", lambda path: mock_usage)
+
+        assert recorder._check_disk_space(raise_on_low=False) is True
+        assert recorder._check_disk_space(raise_on_low=True) is True
