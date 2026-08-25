@@ -7,11 +7,8 @@ the same producer pattern the rest of audio_recorder.py expects
 (numpy chunks pushed into a queue, RMS level updated, errors reported).
 """
 
-from __future__ import annotations
-
 import os
 import platform
-import queue
 import signal
 import subprocess
 import sys
