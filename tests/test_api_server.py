@@ -252,6 +252,21 @@ class TestFiles:
                              token=server["token"])
         assert status == 404
 
+    def test_download_path_traversal_tilde(self, server):
+        # Even though "recording_~" doesn't have slashes, it could resolve
+        # outside the recordings directory.
+        status, _ = _request(server["port"], "/files/recording_~",
+                             token=server["token"])
+        # In Linux it just resolves to recording_~ inside the directory which doesn't exist,
+        # but on some path resolution contexts it could expand, so we expect 403 or 404
+        assert status in (403, 404)
+
+    def test_download_path_traversal_windows_drive(self, server):
+        # Similar edge case handling for C: paths
+        status, _ = _request(server["port"], "/files/recording_C:boot.ini",
+                             token=server["token"])
+        assert status in (400, 403, 404)
+
     def test_download_real_file(self, server):
         d = server["dir"]
         f = d / "recording_dl.wav"
