@@ -1427,7 +1427,7 @@ class AudioRecorder:
             log.warning("Emergency save: writer join failed: %s", e)
 
         # The writer finalizes the file on its way out. Only close it here
-        # if the writer is truly gone, to avoid closing mid-write.
+        # when the writer is truly gone, to avoid closing mid-write.
         writer = self._writer_thread
         if writer is None or not writer.is_alive():
             try:
