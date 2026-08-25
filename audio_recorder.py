@@ -162,11 +162,20 @@ class AudioRecorder:
     """
 
     def __init__(self) -> None:
+        self._init_state_and_locks()
+        self._init_streams_and_queues()
+        self._init_writer_and_timing()
+        self._init_output_and_devices()
+        self._init_audio_processing()
+        self._init_crash_recovery()
+
+    def _init_state_and_locks(self) -> None:
         self._state = RecordingState.IDLE
         self._lock = threading.Lock()
         # Serializes watchdog recovery against stop()/teardown.
         self._recovery_lock = threading.Lock()
 
+    def _init_streams_and_queues(self) -> None:
         # Streams
         self._mic_stream: Optional[sd.InputStream] = None
         self._sys_stream: Optional[sd.InputStream] = None
@@ -181,6 +190,7 @@ class AudioRecorder:
         self._mic_queue: queue.Queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
         self._sys_queue: queue.Queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
 
+    def _init_writer_and_timing(self) -> None:
         # Writer + watchdog
         self._output_file: Optional[sf.SoundFile] = None
         self._writer_thread: Optional[threading.Thread] = None
@@ -195,6 +205,7 @@ class AudioRecorder:
         self._elapsed_seconds: float = 0.0
         self._recording_start_time: Optional[float] = None
 
+    def _init_output_and_devices(self) -> None:
         # Output
         self._output_path: Optional[Path] = None
         self._output_dir: Optional[Path] = None
@@ -214,6 +225,7 @@ class AudioRecorder:
         self._system_audio_enabled: bool = True
         self._session_has_sys: bool = False
 
+    def _init_audio_processing(self) -> None:
         # Audio levels (read by UI, written by callbacks)
         self._mic_level: float = 0.0
         self._sys_level: float = 0.0
@@ -254,6 +266,7 @@ class AudioRecorder:
         self._sys_ring: Deque[Tuple[np.ndarray, float]] = collections.deque()
         self._ring_lock = threading.Lock()
 
+    def _init_crash_recovery(self) -> None:
         # Crash recovery — install handlers for the signals we can on this
         # platform. On Windows SIGTERM doesn't exist, but SIGBREAK (Ctrl+Break)
         # and SIGINT (Ctrl+C) do; on POSIX we cover SIGTERM and SIGHUP too.
