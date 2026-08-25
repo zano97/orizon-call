@@ -188,6 +188,7 @@ class AudioRecorder:
         self._stop_event = threading.Event()  # replaced per session
         self._pause_event = threading.Event()
         self._pause_event.set()
+        self._data_event = threading.Event()
         self._finalizing = False  # True while stop()/emergency save finalizes
         self._zombie_writer: Optional[threading.Thread] = None  # stuck writer
 
@@ -436,6 +437,7 @@ class AudioRecorder:
             self._sys_queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
             self._stop_event = threading.Event()
             self._pause_event.set()
+            self._data_event.clear()
             self._elapsed_seconds = 0.0
             self._mic_level = 0.0
             self._sys_level = 0.0
@@ -528,6 +530,7 @@ class AudioRecorder:
             stop_event = self._stop_event
             self._pause_event.set()
             stop_event.set()
+            self._data_event.set()
 
         # The writer finalizes (flushes + closes) the output file itself
         # before exiting — it is the only thread that touches the file.
@@ -603,6 +606,7 @@ class AudioRecorder:
         if state == RecordingState.RECORDING:
             try:
                 q.put_nowait((chunk, rate))
+                self._data_event.set()
             except queue.Full:
                 self._dropped_chunks += 1
                 if self._dropped_chunks == 1 or self._dropped_chunks % 100 == 0:
@@ -627,6 +631,7 @@ class AudioRecorder:
                 live_q = self._mic_queue if ring is self._mic_ring else self._sys_queue
                 try:
                     live_q.put_nowait((chunk, rate))
+                    self._data_event.set()
                 except queue.Full:
                     self._dropped_chunks += 1
                 return
@@ -1033,6 +1038,7 @@ class AudioRecorder:
 
         try:
             while not stop_event.is_set():
+                self._data_event.clear()
                 self._pause_event.wait(timeout=0.1)
                 if stop_event.is_set():
                     break
@@ -1085,7 +1091,7 @@ class AudioRecorder:
                         wrote = write_mixed(self._take_frames(mic_pending, m_av), None)
 
                 if not wrote:
-                    time.sleep(0.01)
+                    self._data_event.wait(timeout=0.05)
 
                 now = time.monotonic()
                 # Keep the on-disk header valid for crash recovery.
