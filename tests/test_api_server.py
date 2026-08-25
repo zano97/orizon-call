@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -221,6 +222,20 @@ class TestEvents:
     def test_events_rejects_missing_token(self, server):
         status, _ = _request(server["port"], "/events")
         assert status == 401
+
+
+from unittest import mock
+
+
+class TestServerStart:
+
+    def test_start_api_server_oserror(self, caplog):
+        """Test that if the server fails to bind (OSError), it returns None and logs an error."""
+        widget = FakeWidget()
+        with mock.patch("api_server.ThreadedHTTPServer", side_effect=OSError("Address already in use")):
+            srv = start_api_server(widget, port=19876, require_auth=False)
+            assert srv is None
+        assert "Cannot bind to port 19876" in caplog.text
 
 
 class TestFiles:
