@@ -149,6 +149,17 @@ class TestAuth:
         mode = api_server._token_path().stat().st_mode
         assert not (mode & (_stat.S_IRGRP | _stat.S_IROTH))
 
+    def test_issue_token_ignores_chmod_oserror(self, monkeypatch):
+        import os
+        def mock_chmod(path, mode):
+            raise OSError("Mocked OSError")
+
+        monkeypatch.setattr(os, "chmod", mock_chmod)
+
+        token = api_server.issue_token()
+        assert token
+        assert len(token) > 0
+
 
 class TestHostValidation:
 
