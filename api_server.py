@@ -145,16 +145,33 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
     def _origin_allowed(self, origin: Optional[str]) -> bool:
         if not origin:
             return True
-        try:
-            parsed = urllib.parse.urlparse(origin)
-        except ValueError:
-            return False
-        host = parsed.hostname or ""
-        if host in ("localhost", "127.0.0.1", "::1"):
-            return True
+
         if RecorderAPIHandler.cors_allowed_origin and origin == RecorderAPIHandler.cors_allowed_origin:
             return True
-        return False
+
+        try:
+            parsed = urllib.parse.urlparse(origin)
+
+            if parsed.scheme not in ("http", "https"):
+                return False
+
+            if parsed.username or parsed.password:
+                return False
+
+            host = parsed.hostname or ""
+            if host not in ("localhost", "127.0.0.1", "::1"):
+                return False
+
+            expected_host = f"[{host}]" if ":" in host else host
+            expected_origin = f"{parsed.scheme}://{expected_host}"
+
+            port = parsed.port
+            if port:
+                expected_origin += f":{port}"
+
+            return origin == expected_origin
+        except ValueError:
+            return False
 
     def _set_cors_headers(self) -> None:
         origin = self.headers.get("Origin")
