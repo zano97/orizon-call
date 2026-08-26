@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from PyQt6.QtCore import QCoreApplication, QObject, pyqtSlot
+from PyQt6.QtCore import QObject, pyqtSlot
+from PyQt6.QtWidgets import QApplication
 
 import api_server
 from api_server import RecorderAPIHandler, start_api_server
@@ -76,7 +77,8 @@ class FakeWidget(QObject):
 
 @pytest.fixture(scope="module")
 def qapp():
-    app = QCoreApplication.instance() or QCoreApplication([])
+    # Full QApplication (offscreen): later GUI tests share the instance.
+    app = QApplication.instance() or QApplication([])
     yield app
 
 

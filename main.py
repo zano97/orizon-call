@@ -110,8 +110,9 @@ def main() -> None:
     parser.add_argument(
         "--format",
         choices=["wav", "flac", "mp3"],
-        default="wav",
-        help="Output audio format (default: wav). MP3 uses the bundled ffmpeg.",
+        default=None,
+        help="Output audio format (default: the one chosen in the in-app "
+             "settings, initially wav). MP3 uses the bundled ffmpeg.",
     )
     parser.add_argument("--verbose", action="store_true", help="DEBUG-level console logs.")
     parser.add_argument("--quiet", action="store_true", help="WARNING-level console logs.")
@@ -195,16 +196,13 @@ def main() -> None:
 
     recorder = AudioRecorder()
 
-    if args.output_dir:
-        recorder.set_output_directory(args.output_dir)
-
-    recorder.set_output_format(args.format)
-    # Default: combined mix. --dual-track opts into L=mic / R=sys layout.
-    recorder.set_mix_mode(not args.dual_track)
+    # Saved in-app settings first, explicit CLI flags on top (one run only:
+    # flags are never written back — the GUI settings stay as the user set
+    # them from the widget's right-click menu → Impostazioni).
+    import app_settings
+    settings = app_settings.merge_cli_overrides(app_settings.load_settings(), args)
+    app_settings.apply_to_recorder(recorder, settings)
     recorder.set_preroll_seconds(args.preroll)
-    recorder.set_auto_balance(not args.no_auto_balance)
-    recorder.set_normalize_lufs(args.normalize)
-    recorder.set_system_audio_enabled(not args.no_system_audio)
 
     mic_ok, sys_ok, guidance = recorder.detect_devices()
 
@@ -232,7 +230,7 @@ def main() -> None:
         lambda p: log.info("Recording saved: %s", p)
     )
 
-    if not args.no_system_audio and not sys_ok:
+    if settings["system_audio"] and not sys_ok:
         log.info("System audio not available. Mic only.\n%s", guidance)
 
     widget.show()
@@ -243,7 +241,7 @@ def main() -> None:
     api_server = start_api_server(
         widget,
         port=args.api_port,
-        output_dir=args.output_dir,
+        output_dir=Path(settings["output_dir"]) if settings["output_dir"] else None,
         cors_origin=args.cors_origin,
         require_auth=not args.no_auth,
         bound_socket=bound_socket,
