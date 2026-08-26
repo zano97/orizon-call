@@ -1,4 +1,3 @@
-import pytest
 from macos_system_audio import get_permission_guidance
 
 def test_get_permission_guidance():
