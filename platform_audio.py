@@ -185,6 +185,8 @@ def _detect_windows() -> Tuple[Optional[Any], Optional[int], Optional[float]]:
 
 def _detect_linux() -> Tuple[Optional[int], Optional[int], Optional[float]]:
     """Detect PulseAudio/PipeWire monitor source on Linux."""
+    devices = sd.query_devices()
+
     # Method 1: pulsectl for precise detection. PortAudio exposes pulse
     # sources under their *description* ("Monitor of Built-in Audio ..."),
     # not their internal name ("alsa_output...monitor"), so we match on
@@ -192,7 +194,6 @@ def _detect_linux() -> Tuple[Optional[int], Optional[int], Optional[float]]:
     pulse_names = _detect_linux_pulsectl()
 
     if pulse_names:
-        devices = sd.query_devices()
         for candidate in pulse_names:
             cand_lower = candidate.lower()
             for i, dev in enumerate(devices):
@@ -202,7 +203,6 @@ def _detect_linux() -> Tuple[Optional[int], Optional[int], Optional[float]]:
                     return (i, dev['max_input_channels'], dev['default_samplerate'])
 
     # Method 2: fallback - scan for any device with 'monitor' in name
-    devices = sd.query_devices()
     for i, dev in enumerate(devices):
         if dev['max_input_channels'] > 0 and 'monitor' in dev['name'].lower():
             return (i, dev['max_input_channels'], dev['default_samplerate'])

@@ -9,11 +9,8 @@ Modules just do `logger = logging.getLogger(__name__)` and inherit
 this configuration. Calling setup_logging() more than once is a no-op.
 """
 
-from __future__ import annotations
-
 import logging
 import logging.handlers
-import os
 import sys
 from pathlib import Path
 

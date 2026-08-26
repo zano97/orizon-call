@@ -5,6 +5,8 @@ using a Qt-free fake widget (QObject is enough for queued slots).
 
 import json
 import socket
+import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +28,9 @@ class FakeWidget(QObject):
 
     def recorder_state_name(self) -> str:
         return self.state_name
+
+    def wait_for_status_change(self, timeout: float = 1.0) -> None:
+        threading.Event().wait(min(timeout, 0.05))
 
     def recorder_status(self) -> dict:
         return {
@@ -144,10 +149,24 @@ class TestAuth:
         status_line = response.split(b"\r\n", 1)[0]
         assert b" 401" in status_line or b" 403" in status_line
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="POSIX file modes don't apply on Windows (ACLs)")
     def test_token_file_permissions(self, server):
         import stat as _stat
         mode = api_server._token_path().stat().st_mode
         assert not (mode & (_stat.S_IRGRP | _stat.S_IROTH))
+
+    def test_issue_token_ignores_chmod_oserror(self, monkeypatch, tmp_path):
+        import os
+
+        def mock_chmod(path, mode):
+            raise OSError("Mocked OSError")
+
+        monkeypatch.setattr(os, "chmod", mock_chmod)
+        monkeypatch.setattr(api_server, "_token_path", lambda: tmp_path / "token")
+
+        token = api_server.issue_token()
+        assert token
 
 
 class TestHostValidation:
@@ -252,6 +271,35 @@ class TestFiles:
                              token=server["token"])
         assert status == 404
 
+    def test_download_path_traversal_tilde(self, server):
+        # Even though "recording_~" doesn't have slashes, it could resolve
+        # outside the recordings directory.
+        status, _ = _request(server["port"], "/files/recording_~",
+                             token=server["token"])
+        # In Linux it just resolves to recording_~ inside the directory which doesn't exist,
+        # but on some path resolution contexts it could expand, so we expect 403 or 404
+        assert status in (403, 404)
+
+    def test_download_path_traversal_windows_drive(self, server):
+        # Similar edge case handling for C: paths
+        status, _ = _request(server["port"], "/files/recording_C:boot.ini",
+                             token=server["token"])
+        assert status in (400, 403, 404)
+
+    def test_download_symlink_escape_is_403(self, server, tmp_path_factory):
+        """A recording_-named symlink pointing outside the recordings dir
+        must be refused: resolve() + containment check."""
+        outside = tmp_path_factory.mktemp("outside") / "secret.wav"
+        outside.write_bytes(b"RIFFsecret")
+        link = server["dir"] / "recording_link.wav"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pytest.skip("platform without symlink support")
+        status, _ = _request(server["port"], "/files/recording_link.wav",
+                             token=server["token"])
+        assert status == 403
+
     def test_download_real_file(self, server):
         d = server["dir"]
         f = d / "recording_dl.wav"
@@ -262,3 +310,65 @@ class TestFiles:
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
             assert resp.read() == b"RIFFdata"
+
+
+class TestCors:
+    """Regression tests for the hardened loopback Origin validation."""
+
+    def _origin_header(self, server, origin):
+        status, _ = _request(server["port"], "/health",
+                             headers={"Origin": origin})
+        return status
+
+    def _allowed(self, origin):
+        handler = RecorderAPIHandler.__new__(RecorderAPIHandler)
+        return handler._origin_allowed(origin)
+
+    def test_plain_loopback_origins_allowed(self, server):
+        assert self._allowed("http://localhost")
+        assert self._allowed(f"http://127.0.0.1:{server['port']}")
+        assert self._allowed("http://[::1]:8080")
+        assert self._allowed("https://localhost:3000")
+
+    def test_userinfo_origin_rejected(self):
+        assert not self._allowed("http://user@localhost")
+        assert not self._allowed("http://user:pw@127.0.0.1:80")
+
+    def test_non_http_scheme_rejected(self):
+        assert not self._allowed("ftp://localhost")
+        assert not self._allowed("file://localhost")
+
+    def test_non_loopback_host_rejected(self):
+        assert not self._allowed("http://evil.example.com")
+        assert not self._allowed("http://localhost.evil.com")
+
+    def test_configured_origin_allowed(self, monkeypatch):
+        monkeypatch.setattr(RecorderAPIHandler, "cors_allowed_origin",
+                            "https://app.orizon.example")
+        assert self._allowed("https://app.orizon.example")
+        assert not self._allowed("https://other.example")
+
+    def test_cors_header_reflected_only_for_allowed(self, server):
+        url = f"http://127.0.0.1:{server['port']}/health"
+        req = urllib.request.Request(url)
+        req.add_header("Origin", "http://evil.example.com")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.headers.get("Access-Control-Allow-Origin") is None
+        req = urllib.request.Request(url)
+        req.add_header("Origin", "http://localhost")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost"
+
+
+class TestStartup:
+    def test_start_api_server_bind_error(self, monkeypatch, caplog):
+        def mock_server(*args, **kwargs):
+            raise OSError("mocked error")
+
+        monkeypatch.setattr(api_server, "ThreadedHTTPServer", mock_server)
+
+        widget = FakeWidget()
+        srv = start_api_server(widget, port=19876, require_auth=False)
+
+        assert srv is None
+        assert "Cannot bind to port 19876: mocked error" in caplog.text

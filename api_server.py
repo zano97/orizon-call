@@ -37,15 +37,12 @@ Protected (require token):
   POST /quit          → exit the app
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re
 import secrets
 import socket
 import stat
-import time
 import threading
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -145,16 +142,33 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
     def _origin_allowed(self, origin: Optional[str]) -> bool:
         if not origin:
             return True
-        try:
-            parsed = urllib.parse.urlparse(origin)
-        except ValueError:
-            return False
-        host = parsed.hostname or ""
-        if host in ("localhost", "127.0.0.1", "::1"):
-            return True
+
         if RecorderAPIHandler.cors_allowed_origin and origin == RecorderAPIHandler.cors_allowed_origin:
             return True
-        return False
+
+        try:
+            parsed = urllib.parse.urlparse(origin)
+
+            if parsed.scheme not in ("http", "https"):
+                return False
+
+            if parsed.username or parsed.password:
+                return False
+
+            host = parsed.hostname or ""
+            if host not in ("localhost", "127.0.0.1", "::1"):
+                return False
+
+            expected_host = f"[{host}]" if ":" in host else host
+            expected_origin = f"{parsed.scheme}://{expected_host}"
+
+            port = parsed.port
+            if port:
+                expected_origin += f":{port}"
+
+            return origin == expected_origin
+        except ValueError:
+            return False
 
     def _set_cors_headers(self) -> None:
         origin = self.headers.get("Origin")
@@ -350,7 +364,7 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
                         self.wfile.write(f"event: statechange\ndata: {data_line}\n\n".encode())
                     last_state = current_state
                     self.wfile.flush()
-                    time.sleep(1)
+                    w.wait_for_status_change(timeout=1.0)
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     break
         finally:
@@ -391,8 +405,15 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
         if not filename.startswith("recording_"):
             self._json_response(403, {"error": "access denied"})
             return
-        rec_dir = self._get_recordings_dir()
-        filepath = rec_dir / filename
+        rec_dir = self._get_recordings_dir().resolve()
+        try:
+            filepath = (rec_dir / filename).resolve()
+        except (OSError, ValueError):
+            self._json_response(400, {"error": "invalid path"})
+            return
+        if not filepath.is_relative_to(rec_dir):
+            self._json_response(403, {"error": "access denied"})
+            return
         if not filepath.exists() or not filepath.is_file():
             self._json_response(404, {"error": "file not found"})
             return
