@@ -847,6 +847,11 @@ class FloatingRecorderWidget(QWidget):
 
     # ---------- Public API (used by api_server.py) ----------
 
+    def wait_for_status_change(self, timeout: float = 1.0) -> None:
+        """Block until the recorder state (or mic mute) changes, or the
+        timeout expires. Elapsed time and levels keep riding the timeout."""
+        self._recorder.wait_for_state_change(timeout)
+
     def recorder_status(self) -> dict:
         """Snapshot of recorder state — safe to call from any thread."""
         rec = self._recorder

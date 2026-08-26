@@ -43,7 +43,6 @@ import re
 import secrets
 import socket
 import stat
-import time
 import threading
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -348,7 +347,7 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
                         self.wfile.write(f"event: statechange\ndata: {data_line}\n\n".encode())
                     last_state = current_state
                     self.wfile.flush()
-                    time.sleep(1)
+                    w.wait_for_status_change(timeout=1.0)
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     break
         finally:

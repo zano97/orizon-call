@@ -5,6 +5,7 @@ using a Qt-free fake widget (QObject is enough for queued slots).
 
 import json
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +27,9 @@ class FakeWidget(QObject):
 
     def recorder_state_name(self) -> str:
         return self.state_name
+
+    def wait_for_status_change(self, timeout: float = 1.0) -> None:
+        threading.Event().wait(min(timeout, 0.05))
 
     def recorder_status(self) -> dict:
         return {
