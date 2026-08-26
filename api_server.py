@@ -37,8 +37,6 @@ Protected (require token):
   POST /quit          → exit the app
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re
