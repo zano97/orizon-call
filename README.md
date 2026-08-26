@@ -78,10 +78,9 @@ orizon-call
 > che ScreenCaptureKit usa per catturare l'audio di sistema (lo schermo non
 > viene mai registrato). Si concede una sola volta.
 
-> **MP3 / normalizzazione volume** (opzionali) — richiedono `ffmpeg`:
-> `brew install ffmpeg` (macOS) · `sudo apt install ffmpeg` (Linux) ·
-> `winget install Gyan.FFmpeg` (Windows). Senza ffmpeg l'app registra
-> comunque in WAV/FLAC.
+> **MP3 e normalizzazione volume funzionano subito**: l'app include un
+> ffmpeg statico (via `imageio-ffmpeg`), su tutti i sistemi. Se sul
+> computer c'è già un ffmpeg di sistema, viene usato quello.
 
 ## Come si usa
 
@@ -127,7 +126,7 @@ automaticamente in segmenti `_part2`, `_part3`, …
 ### Opzioni utili
 
 ```bash
-orizon-call --format flac      # FLAC lossless (default: wav; mp3 con ffmpeg)
+orizon-call --format flac      # FLAC lossless (default: wav; anche mp3)
 orizon-call --dual-track       # stereo L=microfono, R=sistema (per trascrizione)
 orizon-call --normalize        # normalizza il volume a -16 LUFS dopo lo stop
 orizon-call --preroll 5        # buffer di pre-roll: non perdi l'inizio call
@@ -197,6 +196,6 @@ Line Tools: `cd helpers && ./build.sh`. Diagnostica cattura:
 | macOS: «audio di sistema non disponibile» | Impostazioni di Sistema → Privacy e Sicurezza → **Registrazione schermo** → abilita l'app (o il Terminale), poi riavvia Orizon Call |
 | Linux: `PortAudio library not found` | `sudo apt install libportaudio2` (Debian/Ubuntu) / `sudo dnf install portaudio` (Fedora) |
 | Linux: il widget non resta in primo piano su Wayland | Comportamento noto di alcuni compositor: il widget si ri-alza da solo ogni pochi secondi |
-| L'export MP3 non parte | Installa `ffmpeg` (vedi sopra); il WAV originale non viene mai perso |
+| L'export MP3 non parte | Non dovrebbe più succedere (ffmpeg è incluso); in ogni caso il WAV originale non viene mai perso — controlla i log |
 | «Un'altra istanza è già in esecuzione» | C'è già un Orizon Call attivo (controlla il widget); oppure usa `--api-port` per cambiare porta |
 | Log dettagliati | `orizon-call --verbose`, file di log in `~/.orizon-call/logs/` |

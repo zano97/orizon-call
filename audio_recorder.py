@@ -45,6 +45,22 @@ from platform_audio import detect_mic_device, detect_system_audio_device, get_sy
 
 log = get_logger("recorder")
 
+
+def _find_ffmpeg() -> Optional[str]:
+    """Path of the ffmpeg executable to use for MP3 export and loudness
+    normalization. Prefers the system ffmpeg on PATH; otherwise falls back
+    to the static binary bundled by imageio-ffmpeg (installed with the app),
+    so post-processing works out of the box on every OS. Returns None only
+    when neither is available."""
+    path = shutil.which('ffmpeg')
+    if path:
+        return path
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
 try:
     import soxr  # type: ignore
     _HAVE_SOXR = True
@@ -1639,7 +1655,7 @@ class AudioRecorder:
         normalization in Python without large dependencies. If ffmpeg is
         unavailable, we fall back to a naive peak normalize.
         """
-        ffmpeg = shutil.which('ffmpeg')
+        ffmpeg = _find_ffmpeg()
         if not ffmpeg:
             log.info("ffmpeg not found — falling back to peak normalization.")
             for path in self._segment_paths:
@@ -1700,7 +1716,7 @@ class AudioRecorder:
             log.warning("Peak normalize failed for %s: %s", path, e)
 
     def _convert_to_mp3(self) -> None:
-        ffmpeg = shutil.which('ffmpeg')
+        ffmpeg = _find_ffmpeg()
         if not ffmpeg:
             self._report_error("ffmpeg not found. File saved as WAV.")
             return

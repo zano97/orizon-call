@@ -139,9 +139,6 @@ if [ "$OS" = "Linux" ]; then
             warn "Ricordati di installarla: sudo apt install libportaudio2  (Debian/Ubuntu)"
         fi
     fi
-    if ! command -v ffmpeg >/dev/null 2>&1; then
-        warn "ffmpeg non trovato (opzionale: serve solo per l'export MP3 e la normalizzazione del volume)."
-    fi
 fi
 
 # ── 2. Scarica / aggiorna il codice ──────────────────────────────────────────
