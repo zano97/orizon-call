@@ -1,9 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  Orizon Call — installer per Windows 10/11
 #
-#  Installazione con un solo comando (PowerShell):
+#  Installazione con un solo comando (PowerShell; repository privato: serve
+#  la GitHub CLI autenticata, `gh auth login`):
 #
-#    irm https://raw.githubusercontent.com/zano97/orizon-call/master/install.ps1 | iex
+#    gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.ps1 | Out-String | iex
 #
 #  Cosa fa:
 #    1. Controlla Python ≥ 3.10 (se manca prova a installarlo con winget).
@@ -12,8 +13,8 @@
 #    4. Crea il comando `orizon-call`, i collegamenti nel menu Start e sul
 #       Desktop (avvio senza finestra console).
 #
-#  Disinstallazione:
-#    $env:ORIZON_CALL_UNINSTALL='1'; irm https://raw.githubusercontent.com/zano97/orizon-call/master/install.ps1 | iex
+#  Disinstallazione (dopo l'installazione):
+#    orizon-call uninstall
 #
 #  Variabili opzionali:
 #    $env:ORIZON_CALL_REF = 'nome-branch'   # installa da un branch diverso

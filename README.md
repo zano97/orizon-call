@@ -33,12 +33,22 @@ PulseAudio/PipeWire.
 
 ## Installazione (un solo comando)
 
+Il repository è privato, quindi serve un account GitHub con accesso e la
+**GitHub CLI** autenticata — una volta sola:
+
+```bash
+brew install gh        # macOS   (Windows: winget install GitHub.cli)
+gh auth login          # login con il tuo account GitHub
+```
+
+Poi l'installazione è un solo comando.
+
 ### macOS / Linux
 
 Apri il Terminale e incolla:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zano97/orizon-call/master/install.sh | bash
+gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.sh | bash
 ```
 
 ### Windows 10/11
@@ -46,10 +56,12 @@ curl -fsSL https://raw.githubusercontent.com/zano97/orizon-call/master/install.s
 Apri **PowerShell** e incolla:
 
 ```powershell
-irm https://raw.githubusercontent.com/zano97/orizon-call/master/install.ps1 | iex
+gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.ps1 | Out-String | iex
 ```
 
-Fine. L'installer fa tutto da solo:
+Fine. L'installer riconosce da solo la GitHub CLI e la usa anche per
+scaricare il codice e per i futuri `orizon-call update`. Per il resto fa
+tutto da solo:
 
 1. controlla i prerequisiti (Python ≥ 3.10, su Linux la libreria PortAudio)
    e dove possibile **li installa automaticamente**;
@@ -72,40 +84,6 @@ orizon-call
 | Aggiornare all'ultima versione | `orizon-call update` |
 | Disinstallare (le registrazioni restano) | `orizon-call uninstall` |
 | Vedere tutte le opzioni | `orizon-call --help` |
-
-### Se il repository è privato
-
-Con il repository privato GitHub non serve nessun file in forma anonima,
-quindi i comandi qui sopra rispondono `404`. Servono credenziali — due modi:
-
-**Consigliato — GitHub CLI** (una volta sola: `brew install gh` /
-`winget install GitHub.cli`, poi `gh auth login`):
-
-```bash
-# macOS / Linux
-gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.sh | bash
-```
-```powershell
-# Windows
-gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.ps1 | Out-String | iex
-```
-
-L'installer riconosce da solo la GitHub CLI: la usa anche per scaricare il
-codice e per i futuri `orizon-call update`, senza mai chiederti nulla.
-
-**In alternativa — token di lettura** ([crearne uno](https://github.com/settings/tokens)):
-
-```bash
-# macOS / Linux
-export GITHUB_TOKEN=<il-tuo-token>
-curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-  https://raw.githubusercontent.com/zano97/orizon-call/master/install.sh | bash
-```
-```powershell
-# Windows
-$env:GITHUB_TOKEN = '<il-tuo-token>'
-irm -Headers @{Authorization="Bearer $env:GITHUB_TOKEN"} https://raw.githubusercontent.com/zano97/orizon-call/master/install.ps1 | iex
-```
 
 > **Permessi macOS** — al primo avvio macOS chiede l'accesso al
 > **Microfono** e alla **Registrazione schermo**: quest'ultima è il permesso
