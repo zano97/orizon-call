@@ -2,9 +2,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  Orizon Call — installer per macOS e Linux
 #
-#  Installazione con un solo comando:
+#  Installazione con un solo comando (repository privato: serve la GitHub
+#  CLI autenticata, `gh auth login`):
 #
-#    curl -fsSL https://raw.githubusercontent.com/zano97/orizon-call/master/install.sh | bash
+#    gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.sh | bash
 #
 #  Cosa fa:
 #    1. Controlla i prerequisiti (Python ≥ 3.10, git; su Linux PortAudio)
@@ -42,9 +43,9 @@ say()  { printf '\033[1;32m•\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m⚠\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
-# Chiede conferma sul terminale anche quando lo script arriva via pipe
-# (curl … | bash). Senza terminale risponde "no" senza bloccarsi.
-# Vero solo se esiste un terminale interattivo da cui leggere.
+# Vero solo se esiste un terminale interattivo da cui leggere: le domande
+# funzionano anche quando lo script arriva via pipe (gh api … | bash),
+# e senza terminale rispondono "no" senza bloccarsi.
 _has_tty() { { : < /dev/tty; } 2>/dev/null; }
 
 ask() {
@@ -75,7 +76,7 @@ uninstall() {
 case "$OS" in
     Darwin|Linux) ;;
     MINGW*|MSYS*|CYGWIN*)
-        die "Su Windows usa PowerShell: irm https://raw.githubusercontent.com/$REPO/$REF/install.ps1 | iex" ;;
+        die "Su Windows usa PowerShell: gh api -H \"Accept: application/vnd.github.raw\" repos/$REPO/contents/install.ps1 | Out-String | iex" ;;
     *) die "Sistema operativo non supportato: $OS" ;;
 esac
 
