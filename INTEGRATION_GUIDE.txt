@@ -188,8 +188,9 @@ Fields:
 ------------------------------------------------------------------------------
   GET /events  (Server-Sent Events)
 ------------------------------------------------------------------------------
-Real-time event stream. Sends full status JSON every second. Sends a named
-"statechange" event whenever the state transitions.
+Real-time event stream. Sends full status JSON at least every second, and
+immediately (event-driven, no latency) on every state or mute transition.
+Sends a named "statechange" event whenever the state transitions.
 
 No polling needed - use EventSource for push updates.
 
@@ -390,7 +391,7 @@ directly). All requests below send the Authorization header.
   // Subscribe to real-time events
   const events = orizon.subscribeToEvents(
     (status) => {
-      // Called every second with full status
+      // Called every second (and instantly on state changes) with full status
       document.getElementById('timer').textContent = formatTime(status.elapsed);
       document.getElementById('mic-level').style.width = `${status.mic_level * 300}%`;
     },
