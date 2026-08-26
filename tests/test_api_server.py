@@ -268,6 +268,35 @@ class TestFiles:
                              token=server["token"])
         assert status == 404
 
+    def test_download_path_traversal_tilde(self, server):
+        # Even though "recording_~" doesn't have slashes, it could resolve
+        # outside the recordings directory.
+        status, _ = _request(server["port"], "/files/recording_~",
+                             token=server["token"])
+        # In Linux it just resolves to recording_~ inside the directory which doesn't exist,
+        # but on some path resolution contexts it could expand, so we expect 403 or 404
+        assert status in (403, 404)
+
+    def test_download_path_traversal_windows_drive(self, server):
+        # Similar edge case handling for C: paths
+        status, _ = _request(server["port"], "/files/recording_C:boot.ini",
+                             token=server["token"])
+        assert status in (400, 403, 404)
+
+    def test_download_symlink_escape_is_403(self, server, tmp_path_factory):
+        """A recording_-named symlink pointing outside the recordings dir
+        must be refused: resolve() + containment check."""
+        outside = tmp_path_factory.mktemp("outside") / "secret.wav"
+        outside.write_bytes(b"RIFFsecret")
+        link = server["dir"] / "recording_link.wav"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pytest.skip("platform without symlink support")
+        status, _ = _request(server["port"], "/files/recording_link.wav",
+                             token=server["token"])
+        assert status == 403
+
     def test_download_real_file(self, server):
         d = server["dir"]
         f = d / "recording_dl.wav"
@@ -278,6 +307,54 @@ class TestFiles:
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
             assert resp.read() == b"RIFFdata"
+
+
+class TestCors:
+    """Regression tests for the hardened loopback Origin validation."""
+
+    def _origin_header(self, server, origin):
+        status, _ = _request(server["port"], "/health",
+                             headers={"Origin": origin})
+        return status
+
+    def _allowed(self, origin):
+        handler = RecorderAPIHandler.__new__(RecorderAPIHandler)
+        return handler._origin_allowed(origin)
+
+    def test_plain_loopback_origins_allowed(self, server):
+        assert self._allowed("http://localhost")
+        assert self._allowed(f"http://127.0.0.1:{server['port']}")
+        assert self._allowed("http://[::1]:8080")
+        assert self._allowed("https://localhost:3000")
+
+    def test_userinfo_origin_rejected(self):
+        assert not self._allowed("http://user@localhost")
+        assert not self._allowed("http://user:pw@127.0.0.1:80")
+
+    def test_non_http_scheme_rejected(self):
+        assert not self._allowed("ftp://localhost")
+        assert not self._allowed("file://localhost")
+
+    def test_non_loopback_host_rejected(self):
+        assert not self._allowed("http://evil.example.com")
+        assert not self._allowed("http://localhost.evil.com")
+
+    def test_configured_origin_allowed(self, monkeypatch):
+        monkeypatch.setattr(RecorderAPIHandler, "cors_allowed_origin",
+                            "https://app.orizon.example")
+        assert self._allowed("https://app.orizon.example")
+        assert not self._allowed("https://other.example")
+
+    def test_cors_header_reflected_only_for_allowed(self, server):
+        url = f"http://127.0.0.1:{server['port']}/health"
+        req = urllib.request.Request(url)
+        req.add_header("Origin", "http://evil.example.com")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.headers.get("Access-Control-Allow-Origin") is None
+        req = urllib.request.Request(url)
+        req.add_header("Origin", "http://localhost")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost"
 
 
 class TestStartup:

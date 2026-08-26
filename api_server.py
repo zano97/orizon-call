@@ -405,8 +405,15 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
         if not filename.startswith("recording_"):
             self._json_response(403, {"error": "access denied"})
             return
-        rec_dir = self._get_recordings_dir()
-        filepath = rec_dir / filename
+        rec_dir = self._get_recordings_dir().resolve()
+        try:
+            filepath = (rec_dir / filename).resolve()
+        except (OSError, ValueError):
+            self._json_response(400, {"error": "invalid path"})
+            return
+        if not filepath.is_relative_to(rec_dir):
+            self._json_response(403, {"error": "access denied"})
+            return
         if not filepath.exists() or not filepath.is_file():
             self._json_response(404, {"error": "file not found"})
             return
