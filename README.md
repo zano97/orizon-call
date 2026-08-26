@@ -67,26 +67,6 @@ orizon-call
 
 …oppure cliccando l'icona **Orizon Call**.
 
-> **Repository privato?** Finché questo repository non è pubblico, GitHub
-> richiede un token di lettura ([crearne uno](https://github.com/settings/tokens)).
-> Stessi comandi, con il token:
->
-> ```bash
-> # macOS / Linux
-> export GITHUB_TOKEN=<il-tuo-token>
-> curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
->   https://raw.githubusercontent.com/zano97/orizon-call/master/install.sh | bash
-> ```
->
-> ```powershell
-> # Windows
-> $env:GITHUB_TOKEN = '<il-tuo-token>'
-> irm -Headers @{Authorization="Bearer $env:GITHUB_TOKEN"} https://raw.githubusercontent.com/zano97/orizon-call/master/install.ps1 | iex
-> ```
->
-> Quando il repository diventerà pubblico, i comandi semplici in cima
-> funzioneranno così come sono.
-
 | Azione | Comando |
 |---|---|
 | Aggiornare all'ultima versione | `orizon-call update` |
