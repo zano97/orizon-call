@@ -274,3 +274,17 @@ class TestFiles:
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
             assert resp.read() == b"RIFFdata"
+
+
+class TestStartup:
+    def test_start_api_server_bind_error(self, monkeypatch, caplog):
+        def mock_server(*args, **kwargs):
+            raise OSError("mocked error")
+
+        monkeypatch.setattr(api_server, "ThreadedHTTPServer", mock_server)
+
+        widget = FakeWidget()
+        srv = start_api_server(widget, port=19876, require_auth=False)
+
+        assert srv is None
+        assert "Cannot bind to port 19876: mocked error" in caplog.text
