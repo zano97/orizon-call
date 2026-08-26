@@ -95,8 +95,8 @@ sempre sopra tutte le finestre (anche le app a tutto schermo su macOS).
   una "pillola" con timer, indicatore REC e VU meter di microfono (verde) e
   audio di sistema (blu).
 - **Trascina** il widget dove vuoi: la posizione viene ricordata.
-- **Click destro** → menu completo (avvia/stop, pausa, mute, apri cartella
-  registrazioni, esci).
+- **Click destro** → menu completo (avvia/stop, pausa, mute, impostazioni,
+  apri cartella registrazioni, esci).
 
 <div align="center">
 <img src="assets/screenshots/card-recording.png" width="560" alt="Widget in registrazione: timer, VU meter, mute, pausa, stop" />
@@ -116,17 +116,37 @@ Premuto stop, il file viene finalizzato in background («Salvataggio…»: la
 UI non si blocca mai, nemmeno con ore di audio) e una notifica ti porta
 dritto al file.
 
+### Impostazioni
+
+Click destro sul widget → **Impostazioni…**: da qui scegli come salvare
+l'audio, senza toccare il terminale. Le scelte restano memorizzate.
+
+<div align="center">
+<img src="assets/screenshots/card-settings.png" width="620" alt="Pannello impostazioni: formato audio, cartella, normalizzazione, dual-track" />
+</div>
+
+- **Formato audio** — WAV (qualità piena), FLAC (senza perdite) o MP3
+  (leggero, da condividere).
+- **Salva in** — la cartella di destinazione (predefinita: `~/Downloads`).
+- **Normalizza il volume** — porta la registrazione a -16 LUFS (voce /
+  podcast) o -14 LUFS (streaming) a fine registrazione.
+- **Audio di sistema**, **auto-bilanciamento**, **traccia doppia**
+  (sinistra = microfono, destra = sistema: comoda per la trascrizione).
+
 ### Dove finiscono le registrazioni
 
-`recording_YYYYMMDD_HHMMSS.{wav,flac,mp3}` in `~/Downloads` (personalizzabile
-con `--output-dir`). Ogni WAV ha un sidecar `.json` con i metadati (durata,
-layout canali, segmenti). Le registrazioni oltre ~5 ore vengono divise
-automaticamente in segmenti `_part2`, `_part3`, …
+`recording_YYYYMMDD_HHMMSS.{wav,flac,mp3}` nella cartella scelta nelle
+impostazioni (predefinita: `~/Downloads`). Ogni WAV ha un sidecar `.json`
+con i metadati (durata, layout canali, segmenti). Le registrazioni oltre
+~5 ore vengono divise automaticamente in segmenti `_part2`, `_part3`, …
 
-### Opzioni utili
+### Opzioni da terminale (facoltative)
+
+Tutto ciò che sta nelle impostazioni si può forzare anche da terminale per
+una singola sessione (i flag non modificano le impostazioni salvate):
 
 ```bash
-orizon-call --format flac      # FLAC lossless (default: wav; anche mp3)
+orizon-call --format mp3       # forza il formato per questa sessione
 orizon-call --dual-track       # stereo L=microfono, R=sistema (per trascrizione)
 orizon-call --normalize        # normalizza il volume a -16 LUFS dopo lo stop
 orizon-call --preroll 5        # buffer di pre-roll: non perdi l'inizio call

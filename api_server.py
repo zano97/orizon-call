@@ -374,6 +374,15 @@ class RecorderAPIHandler(BaseHTTPRequestHandler):
     # ---------- Files ----------
 
     def _get_recordings_dir(self) -> Path:
+        # Prefer the widget's live folder (follows the settings dialog);
+        # fall back to the startup value, then to ~/Downloads.
+        w = RecorderAPIHandler.widget
+        recordings_dir = getattr(w, "recordings_dir", None)
+        if recordings_dir is not None:
+            try:
+                return recordings_dir()
+            except Exception:
+                pass
         if RecorderAPIHandler.output_dir:
             return RecorderAPIHandler.output_dir
         return Path.home() / "Downloads"

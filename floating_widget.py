@@ -878,11 +878,21 @@ class FloatingRecorderWidget(QWidget):
                 self._toggle_mute,
             )
         menu.addSeparator()
+        settings_action = menu.addAction("Impostazioni…", self._open_settings)
+        # Format/folder changes only make sense while nothing is recording.
+        settings_action.setEnabled(state == RecordingState.IDLE and not self._busy)
         menu.addAction("Apri cartella registrazioni", self._open_recordings_folder)
         menu.addSeparator()
         menu.addAction("Chiudi Orizon Call", self._quit_requested)
 
         menu.exec(event.globalPos())
+
+    def _open_settings(self) -> None:
+        if self._recorder.state != RecordingState.IDLE or self._busy:
+            return
+        from settings_dialog import open_settings
+        if open_settings(self, self._recorder):
+            Toast("Impostazioni salvate.", kind="info").show_above(self)
 
     # ---------- Public API (used by api_server.py) ----------
 
@@ -1101,10 +1111,14 @@ class FloatingRecorderWidget(QWidget):
         self._mute_btn.setToolTip("Riattiva microfono" if muted else "Silenzia microfono")
         self.mute_changed.emit(muted)
 
+    def recordings_dir(self) -> Path:
+        """Current destination folder (follows live settings changes).
+        Also used by api_server for /files, so the REST API always serves
+        the same folder the app is saving into."""
+        return self._recorder._output_dir or (Path.home() / "Downloads")
+
     def _open_recordings_folder(self) -> None:
-        from pathlib import Path as _P
-        rec_dir = self._recorder._output_dir or (_P.home() / "Downloads")
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(rec_dir)))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.recordings_dir())))
 
     def _quit_requested(self) -> None:
         self._quit_app(confirm=True)
