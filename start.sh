@@ -11,7 +11,11 @@ cd "$(dirname "$0")"
 
 PY=python3
 if ! command -v "$PY" >/dev/null 2>&1; then
-    echo "✗ Python 3 non trovato. Installalo con: brew install python3" >&2
+    if [ "$(uname)" = "Darwin" ]; then
+        echo "✗ Python 3 non trovato. Installalo con: brew install python3" >&2
+    else
+        echo "✗ Python 3 non trovato. Installalo con il gestore pacchetti (es. sudo apt install python3 python3-venv)." >&2
+    fi
     exit 1
 fi
 
@@ -28,12 +32,22 @@ fi
 
 # Reinstalla le dipendenze solo se requirements.txt è cambiato.
 STAMP="$VENV/.deps-ok"
-REQ_HASH=$(shasum -a 256 requirements.txt | cut -d' ' -f1)
+if command -v shasum >/dev/null 2>&1; then
+    REQ_HASH=$(shasum -a 256 requirements.txt | cut -d' ' -f1)
+else
+    REQ_HASH=$(sha256sum requirements.txt | cut -d' ' -f1)
+fi
 if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$REQ_HASH" ]; then
     echo "• Installo le dipendenze (può richiedere qualche minuto la prima volta)…"
     "$VENV/bin/pip" install --quiet --upgrade pip
     "$VENV/bin/pip" install --quiet -r requirements.txt
     echo "$REQ_HASH" > "$STAMP"
+fi
+
+# Linux: PortAudio è richiesto da sounddevice per la cattura audio.
+if [ "$(uname)" = "Linux" ] && ! ldconfig -p 2>/dev/null | grep -q libportaudio; then
+    echo "⚠ Libreria PortAudio non trovata: la registrazione non funzionerà." >&2
+    echo "  Installala con: sudo apt install libportaudio2   (Debian/Ubuntu)" >&2
 fi
 
 # Helper audio di sistema (macOS): compila solo se manca.
