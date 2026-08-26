@@ -29,8 +29,6 @@ While it's running, play any audio (YouTube, Music, a call). The
 heartbeat should show non-zero peak.
 """
 
-from __future__ import annotations
-
 import argparse
 import signal
 import subprocess
