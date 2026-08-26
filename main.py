@@ -111,7 +111,7 @@ def main() -> None:
         "--format",
         choices=["wav", "flac", "mp3"],
         default="wav",
-        help="Output audio format (default: wav). MP3 requires ffmpeg.",
+        help="Output audio format (default: wav). MP3 uses the bundled ffmpeg.",
     )
     parser.add_argument("--verbose", action="store_true", help="DEBUG-level console logs.")
     parser.add_argument("--quiet", action="store_true", help="WARNING-level console logs.")
@@ -139,8 +139,8 @@ def main() -> None:
         metavar="LUFS",
         help="After stop, normalize the file to the given LUFS target "
              "(podcast=-16, streaming=-14). Default value when flag given "
-             "without a number: -16. Requires ffmpeg; falls back to peak "
-             "normalize otherwise.",
+             "without a number: -16. Uses the bundled ffmpeg; falls back to "
+             "peak normalize if unavailable.",
     )
     parser.add_argument(
         "--preroll",

@@ -3,6 +3,7 @@ sounddevice>=0.4.6
 soundfile>=0.12
 numpy>=1.24
 soxr>=0.3                                       # high-quality resampling
+imageio-ffmpeg>=0.4.9                           # bundled static ffmpeg: MP3 + loudnorm with no system install
 PyAudioWPatch>=0.2.12; sys_platform == "win32"
 pulsectl>=23.5; sys_platform == "linux"
 pyobjc-framework-Cocoa>=9.0; sys_platform == "darwin"
