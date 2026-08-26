@@ -73,6 +73,40 @@ orizon-call
 | Disinstallare (le registrazioni restano) | `orizon-call uninstall` |
 | Vedere tutte le opzioni | `orizon-call --help` |
 
+### Se il repository è privato
+
+Con il repository privato GitHub non serve nessun file in forma anonima,
+quindi i comandi qui sopra rispondono `404`. Servono credenziali — due modi:
+
+**Consigliato — GitHub CLI** (una volta sola: `brew install gh` /
+`winget install GitHub.cli`, poi `gh auth login`):
+
+```bash
+# macOS / Linux
+gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.sh | bash
+```
+```powershell
+# Windows
+gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.ps1 | Out-String | iex
+```
+
+L'installer riconosce da solo la GitHub CLI: la usa anche per scaricare il
+codice e per i futuri `orizon-call update`, senza mai chiederti nulla.
+
+**In alternativa — token di lettura** ([crearne uno](https://github.com/settings/tokens)):
+
+```bash
+# macOS / Linux
+export GITHUB_TOKEN=<il-tuo-token>
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/zano97/orizon-call/master/install.sh | bash
+```
+```powershell
+# Windows
+$env:GITHUB_TOKEN = '<il-tuo-token>'
+irm -Headers @{Authorization="Bearer $env:GITHUB_TOKEN"} https://raw.githubusercontent.com/zano97/orizon-call/master/install.ps1 | iex
+```
+
 > **Permessi macOS** — al primo avvio macOS chiede l'accesso al
 > **Microfono** e alla **Registrazione schermo**: quest'ultima è il permesso
 > che ScreenCaptureKit usa per catturare l'audio di sistema (lo schermo non

@@ -19,8 +19,9 @@
 #  Altri usi:
 #    install.sh --uninstall      rimuove tutto (le registrazioni restano)
 #    ORIZON_CALL_REF=<branch>    installa da un branch diverso da master
-#    GITHUB_TOKEN=<token>        necessario solo finché il repository è
-#                                privato (token con permesso di lettura)
+#    GITHUB_TOKEN=<token>        solo per repository privato; in alternativa
+#                                basta la GitHub CLI autenticata (gh auth
+#                                login): il token viene preso da lì da solo
 #
 #  Per aggiornare basta rilanciare lo stesso comando: `orizon-call update`
 #  fa la stessa cosa.
@@ -43,9 +44,12 @@ die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Chiede conferma sul terminale anche quando lo script arriva via pipe
 # (curl … | bash). Senza terminale risponde "no" senza bloccarsi.
+# Vero solo se esiste un terminale interattivo da cui leggere.
+_has_tty() { { : < /dev/tty; } 2>/dev/null; }
+
 ask() {
     local prompt="$1" reply=""
-    if [ -r /dev/tty ]; then
+    if _has_tty; then
         printf '%s [s/N] ' "$prompt" > /dev/tty
         read -r reply < /dev/tty || true
     fi
@@ -145,12 +149,21 @@ fi
 
 mkdir -p "$BASE_DIR"
 
-# Con repository privato serve un token GitHub in sola lettura (variabile
-# GITHUB_TOKEN): viene usato al volo per clone/fetch, mai scritto su disco.
+# Credenziali per repository privato, in ordine di preferenza:
+#   1. variabile GITHUB_TOKEN
+#   2. GitHub CLI già autenticata (gh auth token) — zero configurazione
+#   3. le normali credenziali git salvate sul computer (keychain/credential
+#      helper): il clone le usa da solo
+# Il token è usato al volo per clone/fetch, mai scritto su disco.
+TOKEN="${GITHUB_TOKEN:-}"
+if [ -z "$TOKEN" ] && command -v gh >/dev/null 2>&1; then
+    TOKEN="$(gh auth token 2>/dev/null || true)"
+fi
+
 _gitx() {
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
+    if [ -n "$TOKEN" ]; then
         local auth_b64
-        auth_b64=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')
+        auth_b64=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
         git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth_b64" "$@"
     else
         git "$@"
@@ -158,35 +171,67 @@ _gitx() {
 }
 
 _curlx() {
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$@"
+    if [ -n "$TOKEN" ]; then
+        curl -fsSL -H "Authorization: Bearer $TOKEN" "$@"
     else
         curl -fsSL "$@"
     fi
 }
 
-if command -v git >/dev/null 2>&1; then
+_ask_token() {
+    # Download fallito e nessuna credenziale: repo probabilmente privato.
+    warn "Download fallito: se il repository è privato servono credenziali GitHub."
+    warn "Via più comoda: installa GitHub CLI, esegui 'gh auth login' e rilancia l'installer."
+    if _has_tty; then
+        printf 'In alternativa incolla ora un token GitHub in sola lettura (Invio per annullare): ' > /dev/tty
+        read -r TOKEN < /dev/tty || true
+    fi
+    [ -n "$TOKEN" ]
+}
+
+_fetch_git() {
     if [ -d "$APP_DIR/.git" ]; then
-        say "Aggiorno Orizon Call ($REF)…"
-        (cd "$APP_DIR" && _gitx fetch --depth 1 origin "$REF")
+        (cd "$APP_DIR" && _gitx fetch --depth 1 origin "$REF") || return 1
         git -C "$APP_DIR" checkout -q FETCH_HEAD 2>/dev/null || true
         git -C "$APP_DIR" reset --hard -q FETCH_HEAD
     else
-        say "Scarico Orizon Call da GitHub…"
+        # Clone in una dir temporanea: un download fallito non deve mai
+        # distruggere un'installazione esistente.
+        rm -rf "$APP_DIR.tmp"
+        _gitx clone --depth 1 --branch "$REF" "https://github.com/$REPO" "$APP_DIR.tmp" || return 1
         rm -rf "$APP_DIR"
-        _gitx clone --depth 1 --branch "$REF" "https://github.com/$REPO" "$APP_DIR"
+        mv "$APP_DIR.tmp" "$APP_DIR"
+    fi
+}
+
+_fetch_tarball() {
+    local tgz
+    tgz="$(mktemp)"
+    if ! _curlx "https://api.github.com/repos/$REPO/tarball/refs/heads/$REF" -o "$tgz" &&
+       ! _curlx "https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF" -o "$tgz"; then
+        rm -f "$tgz"
+        return 1
+    fi
+    rm -rf "$APP_DIR.new"
+    mkdir -p "$APP_DIR.new"
+    tar -xzf "$tgz" -C "$APP_DIR.new" --strip-components=1
+    rm -f "$tgz"
+    rm -rf "$APP_DIR"
+    mv "$APP_DIR.new" "$APP_DIR"
+}
+
+if command -v git >/dev/null 2>&1; then
+    say "Scarico Orizon Call da GitHub ($REF)…"
+    if ! _fetch_git; then
+        _ask_token && _fetch_git ||
+            die "Impossibile scaricare il repository. Se è privato: 'gh auth login' (GitHub CLI) oppure GITHUB_TOKEN=<token> davanti al comando."
     fi
 else
     say "git non trovato: scarico l'archivio da GitHub…"
-    TMP_TGZ="$(mktemp)"
-    _curlx "https://api.github.com/repos/$REPO/tarball/refs/heads/$REF" -o "$TMP_TGZ" ||
-        _curlx "https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF" -o "$TMP_TGZ"
-    rm -rf "$APP_DIR.new"
-    mkdir -p "$APP_DIR.new"
-    tar -xzf "$TMP_TGZ" -C "$APP_DIR.new" --strip-components=1
-    rm -f "$TMP_TGZ"
-    rm -rf "$APP_DIR"
-    mv "$APP_DIR.new" "$APP_DIR"
+    if ! _fetch_tarball; then
+        _ask_token && _fetch_tarball ||
+            die "Impossibile scaricare il repository. Se è privato: 'gh auth login' (GitHub CLI) oppure GITHUB_TOKEN=<token> davanti al comando."
+    fi
 fi
 
 # ── 3. Ambiente Python isolato ───────────────────────────────────────────────
