@@ -5,6 +5,7 @@ using a Qt-free fake widget (QObject is enough for queued slots).
 
 import json
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -148,6 +149,8 @@ class TestAuth:
         status_line = response.split(b"\r\n", 1)[0]
         assert b" 401" in status_line or b" 403" in status_line
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="POSIX file modes don't apply on Windows (ACLs)")
     def test_token_file_permissions(self, server):
         import stat as _stat
         mode = api_server._token_path().stat().st_mode
