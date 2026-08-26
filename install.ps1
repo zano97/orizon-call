@@ -17,8 +17,9 @@
 #
 #  Variabili opzionali:
 #    $env:ORIZON_CALL_REF = 'nome-branch'   # installa da un branch diverso
-#    $env:GITHUB_TOKEN = '<token>'          # necessario solo finché il
-#                                           # repository è privato (lettura)
+#    $env:GITHUB_TOKEN = '<token>'          # solo per repository privato; in
+#                                           # alternativa basta la GitHub CLI
+#                                           # autenticata (gh auth login)
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = 'Stop'
@@ -91,38 +92,74 @@ Say "Python trovato: $(& $PyExe @PyArgs --version)"
 # ── 2. Scarica / aggiorna il codice ──────────────────────────────────────────
 New-Item -ItemType Directory -Force -Path $Base | Out-Null
 
-# Repository privato: usa $env:GITHUB_TOKEN al volo (mai scritto su disco).
-$gitAuthArgs = @()
-$webHeaders = @{}
-if ($env:GITHUB_TOKEN) {
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$($env:GITHUB_TOKEN)"))
-    $gitAuthArgs = @('-c', "http.https://github.com/.extraheader=AUTHORIZATION: basic $b64")
-    $webHeaders = @{ Authorization = "Bearer $($env:GITHUB_TOKEN)" }
+# Credenziali per repository privato: $env:GITHUB_TOKEN, altrimenti la
+# GitHub CLI gia' autenticata (gh auth token). Mai scritte su disco.
+$Token = $env:GITHUB_TOKEN
+if (-not $Token -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+    try { $Token = (gh auth token 2>$null | Out-String).Trim() } catch { $Token = $null }
 }
 
-if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $App '.git'))) {
-    Say "Aggiorno Orizon Call ($Ref)..."
-    git -C $App @gitAuthArgs fetch --depth 1 origin $Ref
-    git -C $App reset --hard FETCH_HEAD
-} elseif (Get-Command git -ErrorAction SilentlyContinue) {
-    Say 'Scarico Orizon Call da GitHub (git)...'
-    if (Test-Path $App) { Remove-Item -Recurse -Force $App }
-    git @gitAuthArgs clone --depth 1 --branch $Ref "https://github.com/$Repo" $App
-} else {
-    Say 'Scarico Orizon Call da GitHub (zip)...'
-    $zip = Join-Path $env:TEMP 'orizon-call.zip'
-    try {
-        Invoke-WebRequest "https://api.github.com/repos/$Repo/zipball/refs/heads/$Ref" -Headers $webHeaders -OutFile $zip
-    } catch {
-        Invoke-WebRequest "https://codeload.github.com/$Repo/zip/refs/heads/$Ref" -Headers $webHeaders -OutFile $zip
+function Get-AuthPieces {
+    $git = @(); $web = @{}
+    if ($script:Token) {
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$($script:Token)"))
+        $git = @('-c', "http.https://github.com/.extraheader=AUTHORIZATION: basic $b64")
+        $web = @{ Authorization = "Bearer $($script:Token)" }
     }
-    $tmp = Join-Path $env:TEMP 'orizon-call-unzip'
-    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-    Expand-Archive $zip -DestinationPath $tmp
-    if (Test-Path $App) { Remove-Item -Recurse -Force $App }
-    Move-Item (Get-ChildItem $tmp | Select-Object -First 1).FullName $App
-    Remove-Item -Force $zip
-    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    return ,@($git, $web)
+}
+
+function Fetch-Repo {
+    $pieces = Get-AuthPieces
+    $gitAuthArgs = $pieces[0]; $webHeaders = $pieces[1]
+    if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $App '.git'))) {
+        Say "Aggiorno Orizon Call ($Ref)..."
+        git -C $App @gitAuthArgs fetch --depth 1 origin $Ref
+        if ($LASTEXITCODE -ne 0) { return $false }
+        git -C $App reset --hard FETCH_HEAD
+        return ($LASTEXITCODE -eq 0)
+    } elseif (Get-Command git -ErrorAction SilentlyContinue) {
+        Say 'Scarico Orizon Call da GitHub (git)...'
+        # Clone in una dir temporanea: un download fallito non deve mai
+        # distruggere un'installazione esistente.
+        $tmpApp = "$App.tmp"
+        if (Test-Path $tmpApp) { Remove-Item -Recurse -Force $tmpApp }
+        git @gitAuthArgs clone --depth 1 --branch $Ref "https://github.com/$Repo" $tmpApp
+        if ($LASTEXITCODE -ne 0) { return $false }
+        if (Test-Path $App) { Remove-Item -Recurse -Force $App }
+        Move-Item $tmpApp $App
+        return $true
+    } else {
+        Say 'Scarico Orizon Call da GitHub (zip)...'
+        $zip = Join-Path $env:TEMP 'orizon-call.zip'
+        try {
+            Invoke-WebRequest "https://api.github.com/repos/$Repo/zipball/refs/heads/$Ref" -Headers $webHeaders -OutFile $zip
+        } catch {
+            try {
+                Invoke-WebRequest "https://codeload.github.com/$Repo/zip/refs/heads/$Ref" -Headers $webHeaders -OutFile $zip
+            } catch { return $false }
+        }
+        $tmp = Join-Path $env:TEMP 'orizon-call-unzip'
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        Expand-Archive $zip -DestinationPath $tmp
+        if (Test-Path $App) { Remove-Item -Recurse -Force $App }
+        Move-Item (Get-ChildItem $tmp | Select-Object -First 1).FullName $App
+        Remove-Item -Force $zip
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+        return $true
+    }
+}
+
+if (-not (Fetch-Repo)) {
+    Warn 'Download fallito: se il repository e'' privato servono credenziali GitHub.'
+    Warn 'Via piu'' comoda: installa GitHub CLI (winget install GitHub.cli), esegui ''gh auth login'' e rilancia.'
+    $manual = Read-Host 'In alternativa incolla ora un token GitHub in sola lettura (Invio per annullare)'
+    if ($manual) {
+        $script:Token = $manual.Trim()
+        if (-not (Fetch-Repo)) { throw 'Impossibile scaricare il repository (token non valido o senza accesso).' }
+    } else {
+        throw 'Impossibile scaricare il repository. Usa ''gh auth login'' oppure $env:GITHUB_TOKEN e rilancia.'
+    }
 }
 
 # ── 3. Ambiente Python isolato ───────────────────────────────────────────────
@@ -142,8 +179,10 @@ New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 # Avvio normale: pythonw = nessuna finestra console.
 @"
 @echo off
-if "%1"=="update"    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/$Repo/$Ref/install.ps1 | iex" & goto :eof
-if "%1"=="uninstall" powershell -NoProfile -ExecutionPolicy Bypass -Command "`$env:ORIZON_CALL_UNINSTALL='1'; irm https://raw.githubusercontent.com/$Repo/$Ref/install.ps1 | iex" & goto :eof
+rem update/uninstall usano la copia locale dello script: funziona anche
+rem se il repository e' privato.
+if "%1"=="update"    powershell -NoProfile -ExecutionPolicy Bypass -Command "`$env:ORIZON_CALL_REF='$Ref'; & '$App\install.ps1'" & goto :eof
+if "%1"=="uninstall" powershell -NoProfile -ExecutionPolicy Bypass -Command "`$env:ORIZON_CALL_UNINSTALL='1'; & '$App\install.ps1'" & goto :eof
 start "" "$VenvPythonW" "$App\main.py" %*
 "@ | Set-Content -Encoding ASCII (Join-Path $Bin 'orizon-call.cmd')
 
