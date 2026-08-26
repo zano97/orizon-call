@@ -17,6 +17,8 @@
 #
 #  Variabili opzionali:
 #    $env:ORIZON_CALL_REF = 'nome-branch'   # installa da un branch diverso
+#    $env:GITHUB_TOKEN = '<token>'          # necessario solo finché il
+#                                           # repository è privato (lettura)
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = 'Stop'
@@ -53,7 +55,9 @@ if ($env:ORIZON_CALL_UNINSTALL -eq '1') {
 function Find-Python {
     foreach ($cand in @('py -3.13', 'py -3.12', 'py -3.11', 'py -3.10', 'py -3', 'python3', 'python')) {
         $parts = $cand -split ' '
-        $exe = $parts[0]; $extra = $parts[1..($parts.Count-1)]
+        $exe = $parts[0]
+        $extra = @()
+        if ($parts.Count -gt 1) { $extra = $parts[1..($parts.Count-1)] }
         if (Get-Command $exe -ErrorAction SilentlyContinue) {
             try {
                 $v = & $exe @extra -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>$null
@@ -86,18 +90,32 @@ Say "Python trovato: $(& $PyExe @PyArgs --version)"
 
 # ── 2. Scarica / aggiorna il codice ──────────────────────────────────────────
 New-Item -ItemType Directory -Force -Path $Base | Out-Null
+
+# Repository privato: usa $env:GITHUB_TOKEN al volo (mai scritto su disco).
+$gitAuthArgs = @()
+$webHeaders = @{}
+if ($env:GITHUB_TOKEN) {
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$($env:GITHUB_TOKEN)"))
+    $gitAuthArgs = @('-c', "http.https://github.com/.extraheader=AUTHORIZATION: basic $b64")
+    $webHeaders = @{ Authorization = "Bearer $($env:GITHUB_TOKEN)" }
+}
+
 if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $App '.git'))) {
     Say "Aggiorno Orizon Call ($Ref)..."
-    git -C $App fetch --depth 1 origin $Ref
+    git -C $App @gitAuthArgs fetch --depth 1 origin $Ref
     git -C $App reset --hard FETCH_HEAD
 } elseif (Get-Command git -ErrorAction SilentlyContinue) {
     Say 'Scarico Orizon Call da GitHub (git)...'
     if (Test-Path $App) { Remove-Item -Recurse -Force $App }
-    git clone --depth 1 --branch $Ref "https://github.com/$Repo" $App
+    git @gitAuthArgs clone --depth 1 --branch $Ref "https://github.com/$Repo" $App
 } else {
     Say 'Scarico Orizon Call da GitHub (zip)...'
     $zip = Join-Path $env:TEMP 'orizon-call.zip'
-    Invoke-WebRequest "https://codeload.github.com/$Repo/zip/refs/heads/$Ref" -OutFile $zip
+    try {
+        Invoke-WebRequest "https://api.github.com/repos/$Repo/zipball/refs/heads/$Ref" -Headers $webHeaders -OutFile $zip
+    } catch {
+        Invoke-WebRequest "https://codeload.github.com/$Repo/zip/refs/heads/$Ref" -Headers $webHeaders -OutFile $zip
+    }
     $tmp = Join-Path $env:TEMP 'orizon-call-unzip'
     if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
     Expand-Archive $zip -DestinationPath $tmp

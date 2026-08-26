@@ -19,6 +19,8 @@
 #  Altri usi:
 #    install.sh --uninstall      rimuove tutto (le registrazioni restano)
 #    ORIZON_CALL_REF=<branch>    installa da un branch diverso da master
+#    GITHUB_TOKEN=<token>        necessario solo finché il repository è
+#                                privato (token con permesso di lettura)
 #
 #  Per aggiornare basta rilanciare lo stesso comando: `orizon-call update`
 #  fa la stessa cosa.
@@ -145,21 +147,43 @@ fi
 # ── 2. Scarica / aggiorna il codice ──────────────────────────────────────────
 
 mkdir -p "$BASE_DIR"
+
+# Con repository privato serve un token GitHub in sola lettura (variabile
+# GITHUB_TOKEN): viene usato al volo per clone/fetch, mai scritto su disco.
+_gitx() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        local auth_b64
+        auth_b64=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')
+        git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth_b64" "$@"
+    else
+        git "$@"
+    fi
+}
+
+_curlx() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$@"
+    else
+        curl -fsSL "$@"
+    fi
+}
+
 if command -v git >/dev/null 2>&1; then
     if [ -d "$APP_DIR/.git" ]; then
         say "Aggiorno Orizon Call ($REF)…"
-        git -C "$APP_DIR" fetch --depth 1 origin "$REF"
+        (cd "$APP_DIR" && _gitx fetch --depth 1 origin "$REF")
         git -C "$APP_DIR" checkout -q FETCH_HEAD 2>/dev/null || true
         git -C "$APP_DIR" reset --hard -q FETCH_HEAD
     else
         say "Scarico Orizon Call da GitHub…"
         rm -rf "$APP_DIR"
-        git clone --depth 1 --branch "$REF" "https://github.com/$REPO" "$APP_DIR"
+        _gitx clone --depth 1 --branch "$REF" "https://github.com/$REPO" "$APP_DIR"
     fi
 else
     say "git non trovato: scarico l'archivio da GitHub…"
     TMP_TGZ="$(mktemp)"
-    curl -fsSL "https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF" -o "$TMP_TGZ"
+    _curlx "https://api.github.com/repos/$REPO/tarball/refs/heads/$REF" -o "$TMP_TGZ" ||
+        _curlx "https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF" -o "$TMP_TGZ"
     rm -rf "$APP_DIR.new"
     mkdir -p "$APP_DIR.new"
     tar -xzf "$TMP_TGZ" -C "$APP_DIR.new" --strip-components=1
@@ -205,7 +229,7 @@ cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
 # Lancia Orizon Call. Generato da install.sh — le modifiche andranno perse.
 case "\${1:-}" in
-    update)    exec bash "$APP_DIR/install.sh" ;;
+    update)    ORIZON_CALL_REF="\${ORIZON_CALL_REF:-$REF}" exec bash "$APP_DIR/install.sh" ;;
     uninstall) exec bash "$APP_DIR/install.sh" --uninstall ;;
 esac
 exec "$VENV_DIR/bin/python" "$APP_DIR/main.py" "\$@"
