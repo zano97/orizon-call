@@ -17,6 +17,7 @@ animations never stutter.
 import sys
 import threading
 import traceback
+from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -60,18 +61,20 @@ from orizon_logging import get_logger
 log = get_logger("widget")
 
 
-# ---------- Colors ----------
+# ---------- Colors (Orizon design system, orizon-design-theme tokens) ----------
 
-COLOR_GREEN = QColor(80, 255, 30)
+COLOR_GREEN = QColor(107, 239, 26)        # brand.400 #6bef1a (MAIN_BRAND_COLOR)
+COLOR_GREEN_LIGHT = QColor(142, 242, 74)  # brand.300 #8ef24a
+COLOR_GREEN_DARK = QColor(74, 195, 0)     # brand.500 #4ac300
 COLOR_BLUE = QColor(80, 180, 255)
-COLOR_RED = QColor(220, 38, 38)
-COLOR_RED_DARK = QColor(185, 28, 28)
-COLOR_YELLOW = QColor(234, 179, 8)
-COLOR_BG_DARK = QColor(12, 12, 14, 240)
+COLOR_RED = QColor(220, 38, 38)           # error.600 #dc2626
+COLOR_RED_DARK = QColor(185, 28, 28)      # error.700 #b91c1c
+COLOR_YELLOW = QColor(234, 179, 8)        # yellow.500 #eab308
+COLOR_BG_DARK = QColor(11, 18, 32, 240)   # gray.900/950 blend (slate)
 COLOR_WHITE = QColor(255, 255, 255)
-COLOR_WHITE_DIM = QColor(200, 200, 200)
-COLOR_BTN_HOVER = QColor(63, 63, 70)
-COLOR_BORDER = QColor(63, 63, 70)
+COLOR_WHITE_DIM = QColor(203, 213, 225)   # gray.300 #cbd5e1
+COLOR_BTN_HOVER = QColor(51, 65, 85)      # gray.700 #334155
+COLOR_BORDER = QColor(51, 65, 85)         # gray.700 #334155
 
 # ---------- Dimensions ----------
 
@@ -83,6 +86,29 @@ SHRINK_DURATION = 250   # ms
 
 _SETTINGS_ORG = "OrizonCall"
 _SETTINGS_APP = "OrizonCall"
+
+# ---------- Orizon logo (official glyph, tinted brand green) ----------
+
+_LOGO_SVG_PATH = Path(__file__).resolve().parent / "assets" / "orizon-icon.svg"
+_logo_renderer = None  # lazy singleton; False = tried and failed
+
+
+def _get_logo_renderer():
+    """QSvgRenderer for the official Orizon glyph, or None if unavailable
+    (missing asset / QtSvg not installed) — callers fall back to the
+    procedural vortex logo."""
+    global _logo_renderer
+    if _logo_renderer is None:
+        try:
+            from PyQt6.QtCore import QByteArray
+            from PyQt6.QtSvg import QSvgRenderer
+            svg = _LOGO_SVG_PATH.read_text(encoding="utf-8")
+            svg = svg.replace("currentColor", COLOR_GREEN.name())
+            renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            _logo_renderer = renderer if renderer.isValid() else False
+        except Exception:
+            _logo_renderer = False
+    return _logo_renderer or None
 
 
 def _screen_for(point: QPoint):
@@ -188,7 +214,7 @@ class Toast(QWidget):
         rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         path = QPainterPath()
         path.addRoundedRect(rect, 10, 10)
-        p.fillPath(path, QBrush(QColor(22, 22, 26, 245)))
+        p.fillPath(path, QBrush(QColor(15, 23, 42, 245)))
         p.setPen(QPen(QColor(self._accent.red(), self._accent.green(),
                              self._accent.blue(), 160), 1.2))
         p.drawPath(path)
@@ -676,12 +702,12 @@ class FloatingRecorderWidget(QWidget):
         else:
             painter.fillPath(path, QBrush(COLOR_BG_DARK))
 
-        # Border: green when idle (brighter on hover), gray as pill.
+        # Border: brand green when idle (brighter on hover), slate as pill.
         hover_boost = self._hover * (1.0 - p)
         border_color = QColor(
-            int(60 * (1 - p) + 63 * p + 20 * hover_boost),
-            int(180 * (1 - p) + 63 * p + 60 * hover_boost),
-            int(20 * (1 - p) + 70 * p + 10 * hover_boost),
+            int(74 * (1 - p) + 51 * p + 25 * hover_boost),
+            int(195 * (1 - p) + 65 * p + 44 * hover_boost),
+            int(0 * (1 - p) + 85 * p + 26 * hover_boost),
             int(80 + 120 * p + 70 * hover_boost),
         )
         painter.setPen(QPen(border_color, 1.2 + 0.6 * hover_boost))
@@ -697,7 +723,8 @@ class FloatingRecorderWidget(QWidget):
         painter.end()
 
     def _paint_logo(self, painter: QPainter, w: float, h: float) -> None:
-        """Draw the green black hole vortex logo."""
+        """Draw the Orizon logo: the official brand glyph when the SVG
+        asset is available, otherwise the procedural vortex fallback."""
         cx = w / 2
         cy = h / 2
         margin = 2
@@ -717,6 +744,14 @@ class FloatingRecorderWidget(QWidget):
             painter.setClipping(False)
             return
 
+        renderer = _get_logo_renderer()
+        if renderer is not None:
+            side = r * 2 * 0.88
+            renderer.render(painter, QRectF(-side / 2, -side / 2, side, side))
+            painter.restore()
+            painter.setClipping(False)
+            return
+
         n_ellipses = 36
         base_angle = -35.0
 
@@ -727,7 +762,8 @@ class FloatingRecorderWidget(QWidget):
             opacity = 0.15 + 0.85 * (angle_from_base / 90.0) ** 0.6
             alpha = int(200 * opacity)
 
-            pen = QPen(QColor(80, 255, 30, alpha))
+            pen = QPen(QColor(COLOR_GREEN.red(), COLOR_GREEN.green(),
+                              COLOR_GREEN.blue(), alpha))
             pen.setWidthF(0.9)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -742,15 +778,18 @@ class FloatingRecorderWidget(QWidget):
         for i, frac in enumerate([0.22, 0.42, 0.65]):
             radius = r * frac
             alpha = 140 - i * 25
-            pen = QPen(QColor(100, 255, 50, alpha))
+            pen = QPen(QColor(COLOR_GREEN_LIGHT.red(), COLOR_GREEN_LIGHT.green(),
+                              COLOR_GREEN_LIGHT.blue(), alpha))
             pen.setWidthF(1.1)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(QPointF(0, 0), radius, radius)
 
         core_grad = QRadialGradient(0, 0, r * 0.12)
-        core_grad.setColorAt(0.0, QColor(120, 255, 80, 180))
-        core_grad.setColorAt(1.0, QColor(60, 200, 20, 0))
+        core_grad.setColorAt(0.0, QColor(COLOR_GREEN_LIGHT.red(), COLOR_GREEN_LIGHT.green(),
+                                         COLOR_GREEN_LIGHT.blue(), 180))
+        core_grad.setColorAt(1.0, QColor(COLOR_GREEN_DARK.red(), COLOR_GREEN_DARK.green(),
+                                         COLOR_GREEN_DARK.blue(), 0))
         painter.setBrush(QBrush(core_grad))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(QPointF(0, 0), r * 0.12, r * 0.12)
@@ -805,9 +844,9 @@ class FloatingRecorderWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
-                background: #1c1c1e;
+                background: #0f172a;
                 color: white;
-                border: 1px solid #3f3f46;
+                border: 1px solid #334155;
                 border-radius: 8px;
                 padding: 4px;
             }
@@ -816,11 +855,11 @@ class FloatingRecorderWidget(QWidget):
                 border-radius: 4px;
             }
             QMenu::item:selected {
-                background: #3f3f46;
+                background: #334155;
             }
             QMenu::separator {
                 height: 1px;
-                background: #3f3f46;
+                background: #334155;
                 margin: 4px 8px;
             }
         """)

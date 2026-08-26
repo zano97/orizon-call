@@ -181,6 +181,11 @@ def main() -> None:
     app.setApplicationName("Orizon Call")
     app.setQuitOnLastWindowClosed(True)
 
+    icon_path = Path(__file__).resolve().parent / "assets" / "icons" / "orizon-call-256.png"
+    if icon_path.exists():
+        from PyQt6.QtGui import QIcon
+        app.setWindowIcon(QIcon(str(icon_path)))
+
     if sys.platform == 'darwin':
         _hide_dock_icon_macos()
 
