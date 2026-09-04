@@ -443,6 +443,7 @@ class AudioRecorder:
         self._has_system_audio: bool = False
         self._system_audio_enabled: bool = True
         self._session_has_sys: bool = False
+        self._sys_monitor_source: Optional[str] = None  # Linux PULSE_SOURCE for the sys stream
 
         # Audio levels (read by UI, written by callbacks)
         self._mic_level: float = 0.0
@@ -566,8 +567,19 @@ class AudioRecorder:
         if not self._system_audio_enabled:
             self._sys_device = None
             self._has_system_audio = False
+            self._sys_monitor_source = None
         elif self._sys_device is None and self._state == RecordingState.IDLE:
             self._detect_system_audio()
+        # Pre-roll keeps the streams open between recordings: reopen them
+        # so the next session really reflects the new choice.
+        if self._preroll_active and self._streams_open and self._state == RecordingState.IDLE:
+            with self._lock:
+                with self._recovery_lock:
+                    self._close_streams()
+                    try:
+                        self._open_streams()
+                    except Exception as e:
+                        log.warning("Pre-roll streams could not be reopened: %s", e)
 
     @property
     def is_mic_muted(self) -> bool:
@@ -623,9 +635,14 @@ class AudioRecorder:
             self._sys_channels = min(sys_ch, 2)
             self._sys_samplerate = sys_sr
             self._has_system_audio = True
+            # Linux 'pulse' fallback: the monitor to capture goes with the
+            # device (snapshot, not the mutable module global).
+            self._sys_monitor_source = (platform_audio.linux_monitor_source
+                                        if sys.platform == 'linux' else None)
         else:
             self._sys_device = None
             self._has_system_audio = False
+            self._sys_monitor_source = None
         return self._has_system_audio
 
     @property
@@ -1138,7 +1155,7 @@ class AudioRecorder:
     def _open_portaudio_sys_stream(self) -> None:
         """System audio through PortAudio (Linux monitor source, macOS
         BlackHole-style virtual device)."""
-        monitor = platform_audio.linux_monitor_source if sys.platform == 'linux' else None
+        monitor = self._sys_monitor_source if sys.platform == 'linux' else None
         with _pulse_source_env(monitor):
             stream = sd.InputStream(
                 samplerate=self._sys_samplerate,
@@ -1451,30 +1468,39 @@ class AudioRecorder:
         silence *after* the queued audio — they were lost while the queue
         held it — so the source keeps its length. Returns True if any
         frames were received."""
+        source = 'mic' if to_mono else 'sys'
         got = False
         while True:
-            try:
-                chunk, rate = q.get_nowait()
-            except queue.Empty:
+            # A drop happens only while the queue is full, i.e. after every
+            # item present right now and before anything enqueued later:
+            # take the count first, drain exactly those items, then place
+            # the silence, then look again.
+            lost = self._take_dropped_frames(source)
+            n_items = q.qsize()
+            if n_items == 0 and lost == 0:
                 break
-            got = True
-            arr = np.asarray(chunk, dtype=np.float32)
-            arr = self._to_mono(arr) if to_mono else self._to_stereo(arr)
-            if rate != SAMPLE_RATE:
-                key = (to_mono, float(rate))
-                rs = resamplers.get(key)
-                if rs is None:
-                    rs = _StreamingResampler(rate, SAMPLE_RATE,
-                                             1 if to_mono else 2)
-                    resamplers[key] = rs
-                arr = rs.process(arr)
-            if arr.shape[0]:
-                pending.append(arr)
-        lost = self._take_dropped_frames('mic' if to_mono else 'sys')
-        if lost > 0:
-            pending.append(np.zeros(lost, dtype=np.float32) if to_mono
-                           else np.zeros((lost, CHANNELS), dtype=np.float32))
-            got = True
+            for _ in range(n_items):
+                try:
+                    chunk, rate = q.get_nowait()
+                except queue.Empty:
+                    break
+                got = True
+                arr = np.asarray(chunk, dtype=np.float32)
+                arr = self._to_mono(arr) if to_mono else self._to_stereo(arr)
+                if rate != SAMPLE_RATE:
+                    key = (to_mono, float(rate))
+                    rs = resamplers.get(key)
+                    if rs is None:
+                        rs = _StreamingResampler(rate, SAMPLE_RATE,
+                                                 1 if to_mono else 2)
+                        resamplers[key] = rs
+                    arr = rs.process(arr)
+                if arr.shape[0]:
+                    pending.append(arr)
+            if lost > 0:
+                pending.append(np.zeros(lost, dtype=np.float32) if to_mono
+                               else np.zeros((lost, CHANNELS), dtype=np.float32))
+                got = True
         return got
 
     def _writer_loop(self, stop_event: threading.Event,
@@ -1678,8 +1704,13 @@ class AudioRecorder:
                                     self._take_frames(sys_pending, stale))
                 s_av -= stale
 
+        # Batch small overlaps only while both sides are short: once one
+        # side has pulled ahead, flush even a tiny overlap so the lagging
+        # side can run empty and the starvation/drift handling below can
+        # see it (a dying source leaving 1..479 residual frames must not
+        # freeze the writer forever).
         n = min(m_av, s_av)
-        if n >= MIN_WRITE_FRAMES:
+        if n > 0 and (n >= MIN_WRITE_FRAMES or abs(m_av - s_av) >= MIN_WRITE_FRAMES):
             wrote = write_mixed(self._take_frames(mic_pending, n),
                                 self._take_frames(sys_pending, n))
             m_av -= n
@@ -1787,28 +1818,36 @@ class AudioRecorder:
 
     def _finish_unattended(self, message: str, post_process: bool) -> None:
         """Shared tail of the non-user teardown paths (writer fatal,
-        watchdog auto-stop): freeze the timer, run post-processing while
-        the state says STOPPING, then IDLE so the UI/API reconcile."""
+        watchdog auto-stop): take ownership of the finalization atomically
+        (a user stop() that got in first owns it — never two ffmpeg runs
+        on the same file), freeze the timer, run post-processing while the
+        state says STOPPING, then IDLE so the UI/API reconcile."""
         acquired = self._lock.acquire(timeout=2.0)
         try:
-            if self._state != RecordingState.IDLE:
-                self._elapsed_seconds = self.elapsed_time
-                self._recording_start_time = None
-                self._set_state(RecordingState.STOPPING)
+            if (self._finalizing
+                    or self._state in (RecordingState.IDLE, RecordingState.STOPPING)):
+                return  # somebody else (stop(), emergency save) owns the teardown
+            self._finalizing = True
+            self._elapsed_seconds = self.elapsed_time
+            self._recording_start_time = None
+            self._set_state(RecordingState.STOPPING)
         finally:
             if acquired:
                 self._lock.release()
-        if post_process:
+        try:
+            if post_process:
+                try:
+                    self._post_process()
+                except Exception:
+                    log.exception("Post-processing after auto-stop failed")
+        finally:
+            acquired = self._lock.acquire(timeout=2.0)
             try:
-                self._post_process()
-            except Exception:
-                log.exception("Post-processing after auto-stop failed")
-        acquired = self._lock.acquire(timeout=2.0)
-        try:
-            self._set_state(RecordingState.IDLE)
-        finally:
-            if acquired:
-                self._lock.release()
+                self._set_state(RecordingState.IDLE)
+                self._finalizing = False
+            finally:
+                if acquired:
+                    self._lock.release()
         self._report_error(message)
 
     # ---------- Watchdog ----------
@@ -1994,13 +2033,19 @@ class AudioRecorder:
             # Re-detect: the user may have plugged in a different device.
             idx, ch, sr = detect_mic_device()
             if sys_was_open:
-                # Indices may have changed with the refresh.
+                # Indices may have changed with the refresh. A transient
+                # detection failure (PulseAudio restarting — often the same
+                # event that killed the mic) must keep the previous identity:
+                # opening the Linux 'pulse' device without its monitor source
+                # would capture the microphone as "system audio".
+                previous = (self._sys_device, self._sys_channels, self._sys_samplerate,
+                            self._sys_monitor_source)
                 try:
-                    dev, sch, ssr = detect_system_audio_device()
-                    if dev is not None and not isinstance(dev, (dict, str)):
-                        self._sys_device = dev
-                        self._sys_channels = min(int(sch), 2)
-                        self._sys_samplerate = float(ssr)
+                    if not self._detect_system_audio():
+                        (self._sys_device, self._sys_channels, self._sys_samplerate,
+                         self._sys_monitor_source) = previous
+                        self._has_system_audio = True
+                        log.warning("System audio re-detection failed — reopening the previous device.")
                     self._open_portaudio_sys_stream()
                 except Exception as e:
                     log.warning("System audio reopen after mic recovery failed: %s", e)
@@ -2411,6 +2456,9 @@ class AudioRecorder:
         new_paths = []
         sidecars: List[Tuple[dict, Path]] = []
         for wav_path in self._segment_paths:
+            if wav_path.suffix.lower() == '.mp3':
+                new_paths.append(wav_path)  # already converted
+                continue
             mp3_path = wav_path.with_suffix('.mp3')
             try:
                 # A system ffmpeg without libmp3lame fails the encode; the

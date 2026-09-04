@@ -995,3 +995,152 @@ class TestWidgetRound2:
             w.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
         assert called == ["rec", "pause"]
         assert w._mute_btn.accessibleName() == "Silenzia microfono"
+
+
+# ====================================================================
+# Fixes from the adversarial diff review
+# ====================================================================
+
+class TestDiffReviewFixes:
+
+    def test_small_residual_never_freezes_starvation(self, recorder):
+        """A dying source that leaves < 10 ms pending must not block the
+        writer forever: the overlap is flushed, the source runs empty and
+        starvation padding kicks in."""
+        recorder._has_system_audio = True
+        recorder._sys_device = "fake"
+        path = recorder.start()
+        recorder._sys_queue.put_nowait((_sys(n=200), SAMPLE_RATE))   # residual, then silence
+        for _ in range(30):
+            recorder._mic_queue.put_nowait((_mic(), SAMPLE_RATE))
+        assert _wait_for(lambda: recorder._samples_in_segment >= 30 * 1024, timeout=4.0)
+        recorder.stop()
+        data, _ = sf.read(str(path), always_2d=True)
+        assert data.shape[0] == 30 * 1024
+        assert np.allclose(data[:200], 0.375, atol=0.01)
+        assert np.allclose(data[200:], 0.25, atol=0.01)
+
+    def test_post_processing_runs_once_under_concurrent_stop(self, recorder, monkeypatch):
+        calls = []
+        lock = threading.Lock()
+
+        def slow_post_process():
+            with lock:
+                calls.append(threading.current_thread().name)
+            time.sleep(0.2)
+        monkeypatch.setattr(recorder, "_post_process", slow_post_process)
+        original_close = recorder._close_streams
+
+        def slow_close():
+            time.sleep(0.3)
+            original_close()
+        monkeypatch.setattr(recorder, "_close_streams", slow_close)
+
+        recorder.start()
+        recorder._mic_queue.put_nowait((_mic(), SAMPLE_RATE))
+        assert _wait_for(lambda: recorder._samples_in_segment >= 1024)
+        t = threading.Thread(target=recorder._auto_stop_session,
+                             args=(recorder._stop_event, "Microfono perso"), name="watchdog-sim")
+        t.start()
+        time.sleep(0.05)
+        recorder.stop()               # user reacts to the error toast
+        t.join(5)
+        assert recorder.state == RecordingState.IDLE
+        assert len(calls) == 1, calls
+        assert recorder._finalizing is False
+
+    def test_mic_recovery_keeps_pulse_identity_when_redetection_fails(self, monkeypatch):
+        opened = []
+
+        class FakeInputStream:
+            def __init__(self, **kw):
+                opened.append((kw.get("device"), os.environ.get("PULSE_SOURCE")))
+                self.active = True
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        fake_sd = types.SimpleNamespace(InputStream=FakeInputStream,
+                                        _terminate=lambda: None, _initialize=lambda: None)
+        monkeypatch.setattr(audio_recorder, "sd", fake_sd)
+        monkeypatch.setattr(audio_recorder, "detect_mic_device", lambda: (1, 1, 48000.0))
+        monkeypatch.setattr(audio_recorder, "detect_system_audio_device", lambda: (None, None, None))
+        monkeypatch.setattr(audio_recorder.sys, "platform", "linux")
+        monkeypatch.delenv("PULSE_SOURCE", raising=False)
+
+        r = AudioRecorder()
+        r._sys_device, r._sys_channels, r._sys_samplerate = 5, 2, 44100.0
+        r._sys_monitor_source = "alsa_output.x.monitor"
+        r._has_system_audio = True
+        r._sys_stream = FakeInputStream(device=5)
+        opened.clear()
+
+        assert r._restart_mic_stream() is True
+        assert (5, "alsa_output.x.monitor") in opened, opened
+        assert all(mon is not None for dev, mon in opened if dev == 5)
+        assert r._sys_monitor_source == "alsa_output.x.monitor" and r.has_system_audio
+        assert "PULSE_SOURCE" not in os.environ
+
+    def test_system_audio_toggle_reopens_preroll_streams(self, recorder, monkeypatch):
+        recorder._has_system_audio = True
+        recorder._sys_device = "fake"
+        recorder._preroll_active = True
+        recorder._open_streams()
+        assert recorder._sys_stream is not None
+        recorder.set_system_audio_enabled(False)
+        assert recorder._sys_stream is None and recorder._streams_open
+        assert recorder._mic_stream is not None
+        monkeypatch.setattr(audio_recorder, "detect_system_audio_device", lambda: ("fake", 2, 48000.0))
+        recorder.set_system_audio_enabled(True)
+        assert recorder._sys_stream is not None and recorder.has_system_audio
+        recorder._preroll_active = False
+        recorder._close_streams()
+
+    def test_mp3_segment_is_never_reencoded_or_deleted(self, tmp_path, monkeypatch):
+        fake_ffmpeg.install(tmp_path, monkeypatch, rc=1, output="write")
+        mp3 = tmp_path / "recording_done.mp3"
+        mp3.write_bytes(b"finished")
+        r = AudioRecorder()
+        r._segment_paths = [mp3]
+        r._output_path = mp3
+        r._convert_to_mp3()
+        assert mp3.exists() and mp3.read_bytes() == b"finished"
+        assert r._segment_paths == [mp3]
+
+    def test_rosetta_accepts_arm64_helper(self, tmp_path):
+        from macos_system_audio import binary_matches_host
+        arm = tmp_path / "arm"
+        arm.write_bytes(b"\xcf\xfa\xed\xfe" + (0x0100000C).to_bytes(4, "little") + b"\x00" * 24)
+        assert binary_matches_host(arm, machine="x86_64", translated=True)
+        assert not binary_matches_host(arm, machine="x86_64", translated=False)
+
+
+class TestWidgetQuitDuringUnattendedStop:
+
+    @pytest.fixture()
+    def widget(self, qapp, tmp_path):
+        from floating_widget import FloatingRecorderWidget
+        r = AudioRecorder()
+        r.set_output_directory(tmp_path)
+        w = FloatingRecorderWidget(r)
+        yield w, r
+        w.shutdown()
+        w.close()
+
+    def test_quit_armed_while_recorder_finalizes_on_its_own(self, widget, monkeypatch):
+        import floating_widget
+        w, r = widget
+        quits = []
+        monkeypatch.setattr(floating_widget.QApplication, "quit", staticmethod(lambda: quits.append(1)))
+        r._state = RecordingState.STOPPING       # auto-stop with post-processing in flight
+        w.request_quit()
+        assert w._quit_when_done is True and quits == []
+        r._state = RecordingState.IDLE
+        w._tick()
+        assert quits == [1] and w._quit_when_done is False

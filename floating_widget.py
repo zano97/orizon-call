@@ -1600,6 +1600,19 @@ class FloatingRecorderWidget(QWidget):
                       on_click=self._open_recordings_folder).show_above(self)
                 self._tray.notify("Orizon Call — registrazione interrotta",
                                   f"File salvato: {path.name}", critical=True)
+            if self._quit_when_done:
+                # Quit requested while the recorder was finalizing on its
+                # own (auto-stop + post-processing): honour it now.
+                self._quit_when_done = False
+                QApplication.quit()
+            return
+
+        # A quit armed during a recorder-driven STOPPING (no widget worker
+        # to consume the flag) completes as soon as the recorder is idle.
+        if (self._quit_when_done and not self._busy
+                and state == RecordingState.IDLE):
+            self._quit_when_done = False
+            QApplication.quit()
             return
 
         if not self._ui_recording or self._busy:
