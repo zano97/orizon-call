@@ -52,10 +52,10 @@ way the second launcher exits with a clear log message.
 ================================================================================
 
 The user must have the Orizon Call desktop app running before the web app can
-control it. Required on the user's machine:
-
-  - Python 3.10+
-  - pip install -r requirements.txt
+control it. End users install it with the one-command installers documented
+in README.md (`install.sh` / `install.ps1`, which create an isolated Python
+environment and the `orizon-call` command). Developers: Python 3.10+ and
+`pip install -r requirements.txt`, then `python main.py`.
 
 Dependencies installed automatically per platform:
   - PyQt6           (GUI - all platforms)
@@ -63,6 +63,7 @@ Dependencies installed automatically per platform:
   - soundfile       (WAV/FLAC output - all platforms)
   - numpy           (audio mixing - all platforms)
   - soxr            (high-quality resampling - all platforms)
+  - imageio-ffmpeg  (bundled static ffmpeg: MP3 + loudness normalization)
   - PyAudioWPatch   (Windows only - system audio via WASAPI loopback)
   - pulsectl        (Linux only - PulseAudio/PipeWire monitor sources)
   - pyobjc-framework-Cocoa  (macOS only - dock hiding, floating window)
@@ -75,17 +76,22 @@ System audio capture (the voice of the other call participants):
                 & Security → Screen Recording → enable Terminal / the .app).
                 Works with any output device — headphones, AirPods, speakers.
                 Fallback: macOS 12 and older still need BlackHole.
-  - Windows:    WASAPI loopback. Works out of the box, any output device.
-  - Linux:      PulseAudio/PipeWire monitor source. Works out of the box.
+  - Windows:    WASAPI loopback (callback mode; driver-side overflows are
+                counted). Works out of the box, any output device.
+  - Linux:      PulseAudio/PipeWire monitor of the default sink. With the
+                distributions' PortAudio (ALSA host API only) the capture
+                goes through the ALSA "pulse" plugin device (package
+                libasound2-plugins / alsa-plugins-pulseaudio / pipewire-alsa;
+                the installer offers to install it) with PULSE_SOURCE set to
+                the monitor while that stream is opened.
 
 If the helper binary is missing (e.g. you clone the repo on a new machine),
 build it once with:
     cd helpers && ./build.sh        # requires Xcode Command Line Tools
 
-For MP3 output, ffmpeg must be installed on the system:
-  macOS:   brew install ffmpeg
-  Windows: winget install ffmpeg
-  Linux:   sudo apt install ffmpeg
+MP3 output and loudness normalization work out of the box: the app ships a
+static ffmpeg via the imageio-ffmpeg dependency. A system ffmpeg on PATH is
+preferred when present (set IMAGEIO_FFMPEG_EXE to force a specific binary).
 
 
 ================================================================================
@@ -97,7 +103,9 @@ For MP3 output, ffmpeg must be installed on the system:
 Optional flags:
   --api-port 19876       Change the API port (default: 19876)
   --output-dir /path     Override output directory (default: ~/Downloads)
-  --format wav|flac|mp3  Output format (default: wav). FLAC is lossless 8x smaller.
+  --format wav|flac|mp3  Output format for this run (default: the one chosen
+                         in the in-app Settings, initially wav). FLAC is
+                         lossless and much smaller than WAV.
   --no-system-audio      Record microphone only
   --dual-track           Output stereo file with L=mic, R=system audio.
                          Default: single combined mix where both channels
@@ -147,6 +155,13 @@ Host-header validation: requests whose Host is not localhost/127.0.0.1/::1
 are rejected with 403 (protects against DNS-rebinding pages even when
 --no-auth is used).
 
+HEAD is supported on every GET endpoint. Every error — application errors
+and the ones the HTTP layer raises for malformed requests or unsupported
+methods — has the shape {"error": "<message>", "code": <http status>}
+(state-conflict errors also carry "state"); a missing token answers 401
+with a `WWW-Authenticate: Bearer` challenge. The auth scheme is matched
+case-insensitively ("Bearer"/"bearer").
+
 ------------------------------------------------------------------------------
   GET /health           (no auth required)
 ------------------------------------------------------------------------------
@@ -170,6 +185,7 @@ Response 200:
     "mic_level": 0.0342,
     "sys_level": 0.0128,
     "dropped_chunks": 0,
+    "input_overflows": 0,
     "segments": ["/Users/.../recording_20260412_143022.wav"]
   }
 
@@ -183,6 +199,8 @@ Fields:
   - mic_level:        Real-time microphone RMS level (0.0 to ~0.5)
   - sys_level:        Real-time system audio RMS level (0.0 to ~0.5)
   - dropped_chunks:   Audio chunks lost to writer overload (0 in normal use)
+  - input_overflows:  Input overflows reported by the audio driver (samples
+                      dropped before reaching the app; 0 in normal use)
   - segments:         List of file paths (multiple if recording was auto-split)
 
 ------------------------------------------------------------------------------
@@ -209,13 +227,16 @@ Example:
     handleStateChange(status.state);
   });
 
-(Concurrent SSE connections are capped at 16; further requests get 503.)
+The stream opens with a `retry: 2000` field so EventSource reconnects two
+seconds after the app restarts. (Concurrent SSE connections are capped at
+16; further requests get 503.)
 
 ------------------------------------------------------------------------------
   GET /files
 ------------------------------------------------------------------------------
 List all recording files in the output directory, most recent first
-across all formats (wav/flac/mp3), max 50.
+across all formats (wav/flac/mp3), max 50. A missing or unreadable folder
+yields an empty list (never an error).
 
 Response 200:
   {
@@ -239,7 +260,16 @@ Response headers:
   Content-Disposition: attachment; filename="recording_20260412_143022.wav"
 
 Security: only files starting with "recording_" are served. Path traversal is
-blocked (no slashes or ".." allowed in filename).
+blocked (no slashes, "..", quotes or control characters in the filename).
+
+Byte ranges are honoured (`Range: bytes=start-end`, suffix ranges too):
+the response is 206 with Content-Range, or 416 when unsatisfiable. This is
+what lets an <audio> element play and seek a recording directly from the
+API (Safari requires it). HEAD returns the same headers (Content-Length,
+Content-Type, Content-Disposition, Accept-Ranges) without a body — handy to
+show the file size before downloading. Content-Disposition carries both an
+ASCII `filename` and an RFC 5987 `filename*` and is exposed to cross-origin
+scripts via Access-Control-Expose-Headers.
 
 Example:
   const res = await fetch(
@@ -466,12 +496,16 @@ directly). All requests below send the Authorization header.
 HTTP Status Codes:
   200  Success
   204  CORS preflight OK (OPTIONS)
+  206  Partial content (Range request on GET /files/<name>)
   400  Bad request (invalid filename)
   401  Unauthorized (missing bearer token)
   403  Forbidden (invalid token, disallowed Host header, or access to a
        non-recording file)
   404  Not found (unknown endpoint or file)
   409  Conflict (wrong state for the requested action)
+  416  Range not satisfiable (GET /files/<name>)
+  500  Internal error ({"error": "internal error", "code": 500} — details in the app log)
+  501  Unsupported HTTP method
   503  Recorder not ready (app still initializing) or too many SSE streams
 
 Connection refused (fetch throws TypeError/NetworkError):
@@ -491,27 +525,33 @@ Recommended pattern:
     }
   }
 
-  const status = await safeCall(() => OrizonCall.getStatus());
+  const status = await safeCall(() => orizon.getStatus());
 
 
 ================================================================================
   7. OUTPUT FILES
 ================================================================================
 
-Supported formats (set with --format flag at launch):
+Supported formats (Settings dialog, or --format for a single run):
 
   Format   Extension   Size/minute   Notes
   -------  ---------   -----------   -----
   WAV      .wav        ~11.5 MB      Uncompressed (48kHz stereo 16-bit)
   FLAC     .flac       ~1.5-4 MB     Lossless compression
-  MP3      .mp3        ~1.5 MB       Lossy (VBR q2), requires ffmpeg
+  MP3      .mp3        ~1.5 MB       Lossy (VBR q2, ID3v2.3), via bundled ffmpeg
 
-Location:   ~/Downloads/recording_YYYYMMDD_HHMMSS.{wav,flac,mp3}
-            (can be overridden with --output-dir flag)
+Location:   the platform Downloads folder (Qt's DownloadLocation: the
+            localized XDG folder on Linux, the relocatable known folder on
+            Windows, ~/Downloads on macOS) / recording_YYYYMMDD_HHMMSS.{ext};
+            configurable in Settings or with --output-dir. A missing folder
+            is created; an unusable one falls back to Downloads, then $HOME.
 
 CHANNEL LAYOUT:
   - Default: ONE stereo file where both channels carry mic + system audio
-    mixed 50/50. Natural playback: both voices come out of both ears.
+    mixed together. Natural playback: both voices come out of both ears.
+    With auto-balance (default) the two sources are summed at unity through
+    a soft limiter — a mic-only recording and a mixed one have the same
+    loudness; with --no-auto-balance the raw 50/50 sum is kept.
   - With --dual-track: ONE stereo file with Left = microphone (you),
     Right = system audio (others, downmixed to mono). Useful for feeding
     each speaker to transcription separately.
@@ -531,25 +571,38 @@ The /files endpoint lists all recording files for download.
 
 METADATA:
   - WAV files get a sidecar JSON: recording_xxx.wav.json with software,
-    recorded_at, sample_rate, channels, dual_track, channel_map,
-    duration_seconds, and segments[].
+    recorded_at (session start), finished_at, format, sample_rate, channels,
+    dual_track, channel_map, duration_seconds, segments[], dropped_chunks
+    and input_overflows.
+  - MP3 files keep that sidecar as recording_xxx.mp3.json (segments updated
+    to the .mp3 paths) and get ID3v2.3 tags written by ffmpeg at conversion
+    time.
   - FLAC files embed title/software/date/comment tags via libsndfile.
-  - MP3 files get ID3 tags written by ffmpeg at conversion time.
 
 Audio spec: 48 kHz sample rate, stereo, 16-bit PCM. Resampling (when the
 device runs at a different rate) uses soxr in "HQ" mode for clean output.
 
 AUDIO PROCESSING:
   - Auto-balance (default ON): each source (mic, system) gets a slow-attack
-    RMS-smoothed gain applied before mixing, so a quiet mic isn't drowned
-    by loud call audio (or vice versa). Targets ~-18 dBFS RMS per source.
-    Capped at +15 dB amplification. Skips silent blocks to avoid pumping
-    noise. Disable with --no-auto-balance for raw output.
+    RMS-smoothed gain (0.5 s time constant, independent of block size)
+    applied before mixing, so a quiet mic isn't drowned by loud call audio
+    (or vice versa). Targets ~-18 dBFS RMS per source. Capped at +15 dB
+    amplification. Skips silent blocks to avoid pumping noise. Disable with
+    --no-auto-balance for raw output.
+  - Alignment: the two sources are written sample-aligned. A chunk the
+    writer had to drop under load is replaced by the same amount of silence
+    (the other source is never shifted); a source that stops delivering for
+    0.5 s is padded, and when it comes back it is realigned with the audio
+    captured at the same moment; a slow clock drift between the two devices
+    is corrected 10 ms at a time instead of by a 0.5 s jump.
   - Loudness normalization (opt-in): with --normalize [LUFS], after stop
-    the file is run through ffmpeg's `loudnorm` filter (EBU R128). Default
-    target -16 LUFS (podcast). Falls back to peak normalize at -1 dBFS if
-    ffmpeg isn't installed. Useful for keeping multiple recordings at the
-    same perceived loudness.
+    the file is run through ffmpeg's `loudnorm` filter (EBU R128) in the
+    recommended two-pass mode: pass 1 measures the file, pass 2 applies a
+    single linear gain plus a true-peak limiter (no pumping). Default
+    target -16 LUFS (podcast). A silent file is left untouched; if the
+    measurement pass fails the single-pass mode is used; without any
+    ffmpeg it falls back to peak normalize at -1 dBFS. Works for WAV and
+    FLAC segments (FLAC is re-encoded losslessly).
 
 
 ================================================================================
@@ -588,16 +641,28 @@ Linux:
   9. RELIABILITY & CRASH RECOVERY
 ================================================================================
 
-  - Auto-save on crash: SIGTERM/SIGINT/SIGHUP/SIGBREAK (cross-platform) and
-    atexit hooks finalize the WAV/FLAC header so partial recordings are
-    playable. The output file is closed BEFORE the streams to ensure the
-    header rewrite isn't skipped.
-  - Watchdog thread (runs every 2s during recording):
-      * if the writer thread dies → emergency save
-      * if the mic stream goes inactive (e.g. user unplugs headphones) →
-        re-detect default mic and reopen the stream (3 attempts, backoff)
+  - Graceful shutdown: SIGINT (Ctrl+C), SIGTERM, SIGHUP (terminal closed)
+    and SIGBREAK stop the recording through the normal path — the file is
+    finalized including normalization / MP3 conversion — then the app
+    exits. A second signal performs an emergency save and exits at once.
+    A window-manager close (Alt+F4, session logout) is routed the same way
+    and never drops a recording; OS logout additionally triggers an
+    immediate emergency save. atexit is the last safety net.
+  - The output folder is created on demand; if it cannot be used
+    (unmounted drive, permissions) the app falls back to ~/Downloads and
+    logs a warning instead of silently writing elsewhere.
+  - Devices are re-detected every time a recording starts (PortAudio's
+    device list is refreshed), so a headset plugged in after launch is
+    used; the app no longer exits when no microphone is present at launch.
+  - Watchdog thread (every 2s during recording, or at once when a stream
+    reports it finished):
+      * if the writer thread dies → the session is stopped and finalized
+        like a normal stop (post-processing included)
+      * if the mic stream goes inactive (device unplugged) or stays silent
+        for 5 s → re-detect default mic and reopen the stream (3 attempts,
+        backoff), then stop the session cleanly if unrecoverable
       * if the macOS SCK helper subprocess exits → restart (3 attempts)
-      * if the WASAPI reader thread dies → restart
+      * if the WASAPI stream stops → reopen it (3 attempts)
   - Disk space monitoring: checked before recording starts and every 30 seconds
     during recording. Recording stops gracefully if < 100 MB free.
   - Bounded audio queues: prevent memory exhaustion during long recordings.
@@ -630,6 +695,11 @@ Linux:
   - CORS: by default only loopback Origins are allowed. Pass --cors-origin
     https://your-app.example.com to add a specific origin. Wildcard CORS
     (`*`) is no longer used.
+  - Private Network Access: Chrome sends a preflight with
+    `Access-Control-Request-Private-Network: true` when a public site calls
+    127.0.0.1; the app answers `Access-Control-Allow-Private-Network: true`
+    for an allowed Origin only, so the web app keeps working as browsers
+    tighten local-network access. Preflights are cacheable for 10 minutes.
   - --no-auth disables the token check (useful for local development only).
   - File download (/files/<name>) only serves files starting with "recording_".
     Path traversal attacks are blocked (no slashes or ".." in filename).
@@ -641,14 +711,15 @@ Linux:
   11. QUICK START CHECKLIST
 ================================================================================
 
-  [ ] User installs Python 3.10+ and runs: pip install -r requirements.txt
+  [ ] User installs Orizon Call with the one-command installer (README)
   [ ] (macOS only) User grants "Screen Recording" permission to the parent
       app on first launch (System Settings → Privacy & Security →
       Screen Recording). No BlackHole or virtual device required.
   [ ] Web app reads the bearer token from ~/.orizon-call/token and includes
       "Authorization: Bearer <token>" on every API call.
-  [ ] (MP3 only) User installs ffmpeg
-  [ ] User starts the app: python main.py [--format flac]
+  [ ] (optional) A system ffmpeg on PATH is used when present; otherwise
+      the bundled static ffmpeg handles MP3 and normalization
+  [ ] User starts the app: orizon-call  (developers: python main.py)
   [ ] Web app checks connectivity: GET /health
   [ ] Web app subscribes to events: new EventSource('/events')
   [ ] Web app controls recording: POST /start, /stop, /pause, /resume

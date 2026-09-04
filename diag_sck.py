@@ -53,11 +53,11 @@ def main() -> int:
 
     if not HELPER.exists():
         print(f"[diag] Helper binary not found: {HELPER}", file=sys.stderr)
-        print(f"[diag] Build it with: cd helpers && ./build.sh", file=sys.stderr)
+        print("[diag] Build it with: cd helpers && ./build.sh", file=sys.stderr)
         return 2
 
     print(f"[diag] Spawning {HELPER.name} for {args.seconds} s.")
-    print(f"[diag] Play some audio (YouTube, Music, a call) while this runs.\n")
+    print("[diag] Play some audio (YouTube, Music, a call) while this runs.\n")
 
     proc = subprocess.Popen(
         [str(HELPER)],

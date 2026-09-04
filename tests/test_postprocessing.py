@@ -1,12 +1,10 @@
 """
 Post-processing safety tests: a failed ffmpeg run must NEVER destroy the
 original recording, and the loudnorm temp file must keep a real audio
-extension (ffmpeg infers the muxer from it).
+extension (ffmpeg infers the muxer from it). Runs on every OS through
+tests/fake_ffmpeg.py.
 """
 
-import os
-import stat
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -14,10 +12,7 @@ import pytest
 import soundfile as sf
 
 from audio_recorder import AudioRecorder, SAMPLE_RATE
-
-
-pytestmark = pytest.mark.skipif(sys.platform == "win32",
-                                reason="fake-ffmpeg shell scripts are POSIX")
+from tests import fake_ffmpeg
 
 
 @pytest.fixture()
@@ -33,24 +28,12 @@ def _make_wav(path: Path, seconds: float = 0.2) -> None:
     sf.write(str(path), data, SAMPLE_RATE, subtype="PCM_16")
 
 
-def _fake_ffmpeg(tmp_path: Path, script_body: str, monkeypatch) -> Path:
-    """Install a fake `ffmpeg` at the front of PATH. The script receives
-    the real ffmpeg CLI args; $@ / ${@: -1} give access to them."""
-    bin_dir = tmp_path / "fakebin"
-    bin_dir.mkdir(exist_ok=True)
-    script = bin_dir / "ffmpeg"
-    script.write_text("#!/bin/bash\n" + script_body, encoding="utf-8")
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
-    return script
-
-
 class TestMp3Conversion:
 
     def test_failed_ffmpeg_keeps_wav(self, recorder, tmp_path, monkeypatch):
         wav = tmp_path / "recording_x.wav"
         _make_wav(wav)
-        _fake_ffmpeg(tmp_path, "exit 1\n", monkeypatch)
+        fake_ffmpeg.install(tmp_path, monkeypatch, rc=1, output="none")
 
         errors = []
         recorder.set_error_callback(errors.append)
@@ -68,8 +51,7 @@ class TestMp3Conversion:
         and remove the partial output."""
         wav = tmp_path / "recording_y.wav"
         _make_wav(wav)
-        # Writes garbage to the output (last arg) then fails.
-        _fake_ffmpeg(tmp_path, 'echo garbage > "${@: -1}"\nexit 1\n', monkeypatch)
+        fake_ffmpeg.install(tmp_path, monkeypatch, rc=1, output="write")
 
         recorder._segment_paths = [wav]
         recorder._output_path = wav
@@ -82,7 +64,7 @@ class TestMp3Conversion:
     def test_successful_ffmpeg_replaces_wav(self, recorder, tmp_path, monkeypatch):
         wav = tmp_path / "recording_z.wav"
         _make_wav(wav)
-        _fake_ffmpeg(tmp_path, 'echo mp3data > "${@: -1}"\nexit 0\n', monkeypatch)
+        fake_ffmpeg.install(tmp_path, monkeypatch, rc=0)
 
         recorder._segment_paths = [wav]
         recorder._output_path = wav
@@ -94,6 +76,23 @@ class TestMp3Conversion:
         assert recorder._segment_paths == [mp3]
         assert recorder._output_path == mp3
 
+    def test_second_candidate_used_when_first_fails(self, recorder, tmp_path, monkeypatch):
+        """A system ffmpeg without libmp3lame fails; the bundled build is
+        tried next and the recording still ends up as MP3."""
+        import audio_recorder
+        wav = tmp_path / "recording_fb.wav"
+        _make_wav(wav)
+        failing = fake_ffmpeg.install(tmp_path, monkeypatch, rc=1, output="write")
+        ok = fake_ffmpeg.install_always_ok(tmp_path)
+        monkeypatch.setattr(audio_recorder, "_ffmpeg_candidates", lambda: [str(failing), str(ok)])
+
+        recorder._segment_paths = [wav]
+        recorder._output_path = wav
+        recorder._convert_to_mp3()
+        mp3 = wav.with_suffix(".mp3")
+        assert mp3.exists() and not wav.exists()
+        assert recorder._output_path == mp3
+
 
 class TestLoudnorm:
 
@@ -103,10 +102,7 @@ class TestLoudnorm:
         wav = tmp_path / "recording_n.wav"
         _make_wav(wav)
         args_log = tmp_path / "args.txt"
-        _fake_ffmpeg(tmp_path,
-                     f'echo "$@" >> "{args_log}"\n'
-                     'echo data > "${@: -1}"\nexit 0\n',
-                     monkeypatch)
+        fake_ffmpeg.install(tmp_path, monkeypatch, rc=0, log=args_log)
 
         recorder._segment_paths = [wav]
         recorder._loudness_normalize_segments(-16.0)
@@ -120,7 +116,7 @@ class TestLoudnorm:
         wav = tmp_path / "recording_f.wav"
         _make_wav(wav)
         original = wav.read_bytes()
-        _fake_ffmpeg(tmp_path, "exit 1\n", monkeypatch)
+        fake_ffmpeg.install(tmp_path, monkeypatch, rc=1, measure_rc=1)
 
         recorder._segment_paths = [wav]
         recorder._loudness_normalize_segments(-16.0)

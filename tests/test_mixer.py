@@ -28,10 +28,10 @@ def _mic_chunk(n: int = 1024, value: float = 0.3) -> np.ndarray:
     return np.full((n,), value, dtype=np.float32)
 
 
-def _sys_chunk(n: int = 1024, l: float = 0.5, r: float = -0.5) -> np.ndarray:
+def _sys_chunk(n: int = 1024, left: float = 0.5, right: float = -0.5) -> np.ndarray:
     arr = np.zeros((n, 2), dtype=np.float32)
-    arr[:, 0] = l
-    arr[:, 1] = r
+    arr[:, 0] = left
+    arr[:, 1] = right
     return arr
 
 

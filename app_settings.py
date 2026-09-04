@@ -13,7 +13,7 @@ run without being written back.
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QSettings, QStandardPaths
 
 _ORG = "OrizonCall"
 _APP = "OrizonCall"
@@ -32,6 +32,19 @@ DEFAULTS = {
 
 def make_qsettings() -> QSettings:
     return QSettings(_ORG, _APP)
+
+
+def default_downloads_dir() -> Path:
+    """The user's real Downloads folder: Qt resolves the XDG user dir on
+    Linux (~/Scaricati on an Italian desktop), the relocatable known folder
+    on Windows (OneDrive, other drive) and ~/Downloads on macOS. Falls back
+    to ~/Downloads if the platform reports nothing."""
+    try:
+        location = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation)
+    except Exception:
+        location = ""
+    return Path(location) if location else Path.home() / "Downloads"
 
 
 def _to_bool(value, default: bool) -> bool:
@@ -110,9 +123,11 @@ def merge_cli_overrides(s: dict, args) -> dict:
 
 
 def apply_to_recorder(recorder, s: dict) -> None:
-    """Push the effective settings into an (idle) AudioRecorder."""
+    """Push the effective settings into an (idle) AudioRecorder. The
+    folder is always explicit (the platform Downloads folder when unset)
+    so the recorder, the /files API and 'open folder' all agree."""
     recorder.set_output_format(s["output_format"])
-    recorder.set_output_directory(Path(s["output_dir"]) if s["output_dir"] else None)
+    recorder.set_output_directory(effective_output_dir(s))
     recorder.set_mix_mode(not s["dual_track"])
     recorder.set_auto_balance(s["auto_balance"])
     recorder.set_normalize_lufs(s["normalize_lufs"] if s["normalize"] else None)
@@ -120,4 +135,4 @@ def apply_to_recorder(recorder, s: dict) -> None:
 
 
 def effective_output_dir(s: dict) -> Path:
-    return Path(s["output_dir"]) if s["output_dir"] else Path.home() / "Downloads"
+    return Path(s["output_dir"]).expanduser() if s["output_dir"] else default_downloads_dir()

@@ -2,7 +2,6 @@
 override precedence and application to the recorder."""
 
 import argparse
-from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QSettings
@@ -108,7 +107,7 @@ class TestApplyToRecorder:
         r = AudioRecorder()
         app_settings.apply_to_recorder(r, dict(app_settings.DEFAULTS))
         assert r._output_format == "wav"
-        assert r._output_dir is None
+        assert r._output_dir == app_settings.default_downloads_dir()
         assert r._mix_mode is True
         assert r._normalize_lufs is None
         assert r._system_audio_enabled is True
@@ -116,6 +115,7 @@ class TestApplyToRecorder:
 
 def test_effective_output_dir(tmp_path):
     assert app_settings.effective_output_dir(
-        dict(app_settings.DEFAULTS)) == Path.home() / "Downloads"
+        dict(app_settings.DEFAULTS)) == app_settings.default_downloads_dir()
+    assert app_settings.default_downloads_dir().is_absolute()
     s = dict(app_settings.DEFAULTS, output_dir=str(tmp_path))
     assert app_settings.effective_output_dir(s) == tmp_path

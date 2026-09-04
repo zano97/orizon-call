@@ -109,6 +109,9 @@ sempre sopra tutte le finestre (anche le app a tutto schermo su macOS).
 - **Trascina** il widget dove vuoi: la posizione viene ricordata.
 - **Click destro** → menu completo (avvia/stop, pausa, mute, impostazioni,
   apri cartella registrazioni, esci).
+- **Icona nella barra di stato** (menu bar su macOS, area di notifica su
+  Windows/Linux): gli stessi comandi più «Mostra il widget», per ritrovarlo
+  se finisce dietro un'app a tutto schermo o su un monitor scollegato.
 
 <div align="center">
 <img src="assets/screenshots/card-recording.png" width="560" alt="Widget in registrazione: timer, VU meter, mute, pausa, stop" />
@@ -139,18 +142,25 @@ l'audio, senza toccare il terminale. Le scelte restano memorizzate.
 
 - **Formato audio** — WAV (qualità piena), FLAC (senza perdite) o MP3
   (leggero, da condividere).
-- **Salva in** — la cartella di destinazione (predefinita: `~/Downloads`).
+- **Salva in** — la cartella di destinazione (predefinita: la cartella
+  Download del sistema, es. `~/Scaricati` su un desktop Linux italiano).
 - **Normalizza il volume** — porta la registrazione a -16 LUFS (voce /
-  podcast) o -14 LUFS (streaming) a fine registrazione.
+  podcast) o -14 LUFS (streaming) a fine registrazione (EBU R128 a due
+  passate: un solo guadagno lineare, niente «pompaggio»).
 - **Audio di sistema**, **auto-bilanciamento**, **traccia doppia**
   (sinistra = microfono, destra = sistema: comoda per la trascrizione).
+  Le modifiche valgono subito dalla registrazione successiva, senza riavvio.
+
+Tastiera (con il widget attivo, ad es. dopo «Mostra il widget» dalla tray):
+**Spazio/Invio** avvia o ferma, **P** pausa, **M** mute.
 
 ### Dove finiscono le registrazioni
 
 `recording_YYYYMMDD_HHMMSS.{wav,flac,mp3}` nella cartella scelta nelle
-impostazioni (predefinita: `~/Downloads`). Ogni WAV ha un sidecar `.json`
-con i metadati (durata, layout canali, segmenti). Le registrazioni oltre
-~5 ore vengono divise automaticamente in segmenti `_part2`, `_part3`, …
+impostazioni (predefinita: `~/Downloads`; se non esiste viene creata). Ogni
+WAV e MP3 ha un sidecar `.json` con i metadati (durata, layout canali,
+segmenti). Le registrazioni oltre ~5 ore vengono divise automaticamente in
+segmenti `_part2`, `_part3`, …
 
 ### Opzioni da terminale (facoltative)
 
@@ -177,16 +187,28 @@ orizon-call --help             # tutte le opzioni
 - **Mix allineato al campione**: le due sorgenti sono scritte solo nella
   parte sovrapposta realmente catturata; mai zeri inseriti a casaccio, mai
   tracce sfasate. Ricampionamento streaming (soxr) senza click.
-- **Auto-bilanciamento** del volume mic/sistema (attacco lento, gain rampato
-  per blocco: niente pompaggio).
+- **Auto-bilanciamento** del volume mic/sistema (attacco lento con costante
+  di tempo fissa, gain rampato: niente pompaggio) e somma a guadagno unitario
+  con soft-limiter: una registrazione solo-microfono e una mista hanno lo
+  stesso volume.
+- **Allineamento robusto**: un chunk perso sotto carico diventa silenzio
+  della stessa durata (mai uno sfasamento), una sorgente che torna dopo un
+  buco viene riallineata con l'audio catturato nello stesso istante, la
+  deriva tra i clock dei due dispositivi è corretta 10 ms alla volta.
+- **Dispositivi ri-rilevati a ogni avvio** della registrazione: cuffie
+  collegate dopo l'apertura dell'app funzionano; senza microfono all'avvio
+  l'app parte comunque.
 - **Robustezza**: header WAV sempre consistente su disco (un crash duro
   lascia un file riproducibile), watchdog con recovery di mic/helper,
-  salvataggio d'emergenza su SIGINT/SIGTERM, auto-stop pulito a disco pieno,
-  mai perdita del WAV se la conversione MP3 fallisce.
+  Ctrl+C / SIGTERM / chiusura della finestra = stop pulito con salvataggio
+  completo (secondo segnale = salvataggio d'emergenza immediato), auto-stop
+  pulito a disco pieno, conteggio degli overflow del driver audio, mai
+  perdita del WAV se la conversione MP3 fallisce.
 - **API locale sicura**: bind solo su 127.0.0.1, bearer token (mai nei log),
   validazione Host anti DNS-rebinding, CORS ristretto a origin loopback
-  canonici, protezione path-traversal/symlink sui download, SSE event-driven
-  per aggiornamenti di stato istantanei.
+  canonici (con Private Network Access di Chrome), protezione
+  path-traversal/symlink sui download, byte range per l'anteprima
+  `<audio>`, HEAD, errori sempre JSON, SSE event-driven senza risvegli persi.
 
 ## Integrazione con la web app Orizon
 
@@ -205,11 +227,14 @@ cd orizon-call
 
 In alternativa manuale: `pip install -r requirements.txt && python3 main.py`.
 
-**Test** (110+ casi: allineamento writer, state machine, API, sicurezza):
+**Test** (210+ casi: allineamento writer, deriva/starvation, split, state
+machine, watchdog, API, sicurezza, normalizzazione, rilevamento dispositivi)
+e lint:
 
 ```bash
 pip install -r requirements-dev.txt
 python3 -m pytest tests/
+ruff check .
 ```
 
 **Helper audio macOS** — il binario precompilato è in
@@ -227,7 +252,11 @@ Line Tools: `cd helpers && ./build.sh`. Diagnostica cattura:
 |---|---|
 | macOS: «audio di sistema non disponibile» | Impostazioni di Sistema → Privacy e Sicurezza → **Registrazione schermo** → abilita l'app (o il Terminale), poi riavvia Orizon Call |
 | Linux: `PortAudio library not found` | `sudo apt install libportaudio2` (Debian/Ubuntu) / `sudo dnf install portaudio` (Fedora) |
-| Linux: il widget non resta in primo piano su Wayland | Comportamento noto di alcuni compositor: il widget si ri-alza da solo ogni pochi secondi |
+| Linux: `Could not load the Qt platform plugin "xcb"` | `sudo apt install libxcb-cursor0 libegl1 libxkbcommon-x11-0` (l'installer lo propone da solo) |
+| Linux: audio di sistema assente (solo microfono) | Serve il plugin ALSA per PulseAudio/PipeWire: `sudo apt install libasound2-plugins` (Fedora: `alsa-plugins-pulseaudio`), l'installer lo propone da solo |
+| Mac Intel: «audio di sistema non disponibile» | L'helper incluso è per Apple Silicon: `xcode-select --install` e poi `orizon-call update` lo ricompila per il tuo Mac |
+| Nessun microfono all'avvio | L'app parte comunque: collega il microfono, viene cercato di nuovo a ogni avvio della registrazione |
+| Linux: il widget non resta in primo piano su Wayland | Con XWayland disponibile l'app usa il backend xcb (spostabile, sempre in primo piano); su Wayland puro si ri-alza da solo ogni pochi secondi. Forza un backend con `QT_QPA_PLATFORM=wayland|xcb` |
 | L'export MP3 non parte | Non dovrebbe più succedere (ffmpeg è incluso); in ogni caso il WAV originale non viene mai perso — controlla i log |
 | «Un'altra istanza è già in esecuzione» | C'è già un Orizon Call attivo (controlla il widget); oppure usa `--api-port` per cambiare porta |
 | Log dettagliati | `orizon-call --verbose`, file di log in `~/.orizon-call/logs/` |

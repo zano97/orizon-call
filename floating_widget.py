@@ -8,10 +8,14 @@ Paused: pill with yellow indicator, resume and stop buttons.
 Saving: pill shows a "Salvataggio…" state while a worker thread
 finalizes the file — the GUI thread is never blocked.
 Right-click: context menu (start/stop, pause, mute, open folder, quit).
+Tray / menu-bar icon (where the platform has one): the same controls plus
+"show the widget", so the app is always reachable even when the floating
+circle ended up behind a fullscreen window or on a disconnected screen.
 
 All recorder calls that can block (start/stop) run on worker threads and
 report back via queued signals, so the widget stays responsive and
-animations never stutter.
+animations never stutter. A window-manager close request never kills a
+recording: it is routed through the normal stop-and-save path.
 """
 
 import sys
@@ -21,6 +25,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QObject,
     QPoint,
     QPointF,
     QPropertyAnimation,
@@ -39,6 +44,7 @@ from PyQt6.QtGui import (
     QCursor,
     QDesktopServices,
     QFont,
+    QIcon,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -52,6 +58,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSystemTrayIcon,
     QWidget,
 )
 
@@ -89,8 +96,64 @@ _SETTINGS_APP = "OrizonCall"
 
 # ---------- Orizon logo (official glyph, tinted brand green) ----------
 
-_LOGO_SVG_PATH = Path(__file__).resolve().parent / "assets" / "orizon-icon.svg"
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_ICONS_DIR = _ASSETS_DIR / "icons"
+_LOGO_SVG_PATH = _ASSETS_DIR / "orizon-icon.svg"
+_TRAY_GLYPH_PATH = _ICONS_DIR / "orizon-glyph-512.png"
 _logo_renderer = None  # lazy singleton; False = tried and failed
+
+_IDLE_TOOLTIP = "Clicca per registrare — trascina per spostare"
+
+
+def app_icon() -> QIcon:
+    """The application icon with every rendered size attached, so Qt
+    picks a crisp bitmap for title bars, task switchers and the tray
+    instead of down-scaling the 256 px PNG. On Windows the multi-size
+    .ico is preferred (native tray/taskbar sizes)."""
+    ico = _ICONS_DIR / "orizon-call.ico"
+    if sys.platform == 'win32' and ico.exists():
+        icon = QIcon(str(ico))
+        if not icon.isNull():
+            return icon
+    icon = QIcon()
+    for size in (16, 32, 48, 64, 128, 256, 512):
+        png = _ICONS_DIR / f"orizon-call-{size}.png"
+        if png.exists():
+            icon.addFile(str(png))
+    return icon
+
+
+def apply_macos_floating(widget: QWidget, activate: bool = False) -> None:
+    """macOS: put ``widget``'s NSWindow at the floating level and let it
+    join every Space, including fullscreen apps — the app's main use case
+    is a call running fullscreen. Applied to the floating widget, every
+    toast and every dialog, because Qt creates a fresh NSWindow for each.
+    ``activate`` brings the (accessory, dock-less) app forward so a modal
+    dialog does not open behind the active application."""
+    if sys.platform != 'darwin':
+        return
+    try:
+        from AppKit import NSApplication, NSFloatingWindowLevel
+        # NSWindowCollectionBehavior: CanJoinAllSpaces = 1 << 0,
+        # FullScreenAuxiliary = 1 << 8 (NOT 1 << 4, which is
+        # 'Stationary' and would drop the widget from fullscreen apps).
+        behavior = (1 << 0) | (1 << 8)
+        ns_app = NSApplication.sharedApplication()
+        window = None
+        try:
+            import objc
+            view = objc.objc_object(c_void_p=int(widget.winId()))
+            window = view.window()
+        except Exception:
+            window = None
+        targets = [window] if window is not None else list(ns_app.windows())
+        for win in targets:
+            win.setLevel_(NSFloatingWindowLevel)
+            win.setCollectionBehavior_(behavior)
+        if activate:
+            ns_app.activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
 
 
 def _get_logo_renderer():
@@ -176,18 +239,28 @@ class Toast(QWidget):
     # -- lifecycle --
 
     def show_above(self, anchor: QWidget) -> None:
+        # Stack above the toasts still visible instead of covering them
+        # (the older one is often the more important message); keep the
+        # pile short.
+        visible = [t for t in Toast._active if t.isVisible()]
+        if len(visible) >= 4:
+            visible[0]._start_fade_out()
+            visible = visible[1:]
+        offset = sum(t.height() + 6 for t in visible)
+
         center = anchor.mapToGlobal(anchor.rect().center())
         x = center.x() - self.width() // 2
-        y = anchor.mapToGlobal(anchor.rect().topLeft()).y() - self.height() - 10
+        y = anchor.mapToGlobal(anchor.rect().topLeft()).y() - self.height() - 10 - offset
         screen = _screen_for(center)
         if screen:
             avail = screen.availableGeometry()
             x = max(avail.left() + 6, min(x, avail.right() - self.width() - 6))
             if y < avail.top() + 6:  # no room above -> below
-                y = anchor.mapToGlobal(anchor.rect().bottomLeft()).y() + 10
+                y = anchor.mapToGlobal(anchor.rect().bottomLeft()).y() + 10 + offset
         self.move(x, y)
         self.setWindowOpacity(0.0)
         self.show()
+        apply_macos_floating(self)
         self._fade_in.start()
         Toast._active.append(self)
 
@@ -457,6 +530,124 @@ class IconButton(QPushButton):
         p.end()
 
 
+# ---------- Tray / menu-bar icon ----------
+
+def _tray_icon() -> QIcon:
+    """macOS: the brand glyph as a *template* (mask) icon, so the menu-bar
+    item follows the light/dark menu bar like native status items.
+    Elsewhere: the full-colour app icon (Qt scales it for the tray)."""
+    if sys.platform == 'darwin' and _TRAY_GLYPH_PATH.exists():
+        icon = QIcon(str(_TRAY_GLYPH_PATH))
+        icon.setIsMask(True)
+        return icon
+    return app_icon()
+
+
+class TrayController(QObject):
+    """
+    System-tray (Windows/Linux) or menu-bar (macOS) presence.
+
+    The floating widget is a Tool window: no taskbar/dock entry. If it ends
+    up behind a fullscreen app or on a screen that was unplugged, the tray
+    icon is the way back ("Mostra il widget"). The menu mirrors the widget's
+    right-click menu; native notifications cover the events a user may miss
+    while looking at another window (auto-stop, save errors).
+
+    Silently does nothing on platforms without a tray (e.g. some Wayland
+    sessions without the StatusNotifier extension) — the widget alone
+    still works exactly as before.
+    """
+
+    def __init__(self, widget: "FloatingRecorderWidget"):
+        super().__init__(widget)
+        self._widget = widget
+        self._tray: "QSystemTrayIcon | None" = None
+        self._last_state: "tuple[str, bool] | None" = None
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            icon = _tray_icon()
+            if icon.isNull():
+                return
+            tray = QSystemTrayIcon(icon, self)
+            self._menu = QMenu()
+            self._act_record = self._menu.addAction("Avvia registrazione", widget.toggle_recording)
+            self._act_pause = self._menu.addAction("Pausa", widget.toggle_pause)
+            self._menu.addSeparator()
+            self._menu.addAction("Mostra il widget", widget.bring_to_front)
+            self._act_settings = self._menu.addAction("Impostazioni…", widget.open_settings)
+            self._menu.addAction("Apri cartella registrazioni", widget.open_recordings_folder)
+            self._menu.addSeparator()
+            self._menu.addAction("Chiudi Orizon Call", widget.request_quit_interactive)
+            self._menu.aboutToShow.connect(self._refresh)
+            tray.setContextMenu(self._menu)
+            tray.setToolTip("Orizon Call — pronto")
+            tray.activated.connect(self._on_activated)
+            tray.messageClicked.connect(widget.open_recordings_folder)
+            tray.show()
+            self._tray = tray
+        except Exception:
+            log.exception("Tray icon unavailable")
+            self._tray = None
+
+    @property
+    def available(self) -> bool:
+        return self._tray is not None
+
+    def _on_activated(self, reason) -> None:
+        # Left click / double click: bring the widget back. The context
+        # menu is opened by the platform itself.
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._widget.bring_to_front()
+
+    def _refresh(self) -> None:
+        state = self._widget.recorder_state_name()
+        busy = self._widget.is_busy
+        if state in ("recording", "paused"):
+            self._act_record.setText("Stop e salva")
+            self._act_record.setEnabled(not busy)
+        elif state == "stopping":
+            self._act_record.setText("Salvataggio in corso…")
+            self._act_record.setEnabled(False)
+        else:
+            self._act_record.setText("Avvia registrazione")
+            self._act_record.setEnabled(not busy)
+        self._act_pause.setVisible(state in ("recording", "paused"))
+        self._act_pause.setText("Riprendi" if state == "paused" else "Pausa")
+        self._act_settings.setEnabled(state == "idle" and not busy)
+
+    def set_state(self, state: str, busy: bool) -> None:
+        """Keep the tooltip in sync; called on every state transition only
+        (not every tick — tray tooltips are OS calls)."""
+        if self._tray is None or (state, busy) == self._last_state:
+            return
+        self._last_state = (state, busy)
+        label = {
+            "recording": "in registrazione",
+            "paused": "in pausa",
+            "stopping": "salvataggio in corso…",
+        }.get(state, "pronto")
+        if busy and state == "idle":
+            label = "avvio in corso…"
+        self._tray.setToolTip(f"Orizon Call — {label}")
+
+    def notify(self, title: str, message: str, critical: bool = False,
+               msecs: int = 6000) -> None:
+        if self._tray is None:
+            return
+        icon = (QSystemTrayIcon.MessageIcon.Critical if critical
+                else QSystemTrayIcon.MessageIcon.Information)
+        try:
+            self._tray.showMessage(title, message, icon, msecs)
+        except Exception:
+            log.debug("Tray notification failed", exc_info=True)
+
+    def hide(self) -> None:
+        if self._tray is not None:
+            self._tray.hide()
+
+
 # ---------- Main widget ----------
 
 class FloatingRecorderWidget(QWidget):
@@ -485,6 +676,10 @@ class FloatingRecorderWidget(QWidget):
         self._quit_when_done = False  # quit once the in-flight stop finishes
         self._hover = 0.0
         self._raise_timer: QTimer | None = None
+        self._closing = False       # aboutToQuit ran: let close events through
+        self._quit_interactive = True   # show dialogs on the quit path?
+        self._settings_dialog_open = False
+        self._pending_settings: dict | None = None  # saved while recording
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
 
         # Animation state: 0.0 = circle, 1.0 = pill
@@ -502,6 +697,14 @@ class FloatingRecorderWidget(QWidget):
         self.recording_error.connect(self._on_error)
         self._start_done.connect(self._on_start_done)
         self._stop_done.connect(self._on_stop_done)
+
+        self._tray = TrayController(self)
+
+        # A monitor unplugged mid-call must not strand the widget off-screen.
+        app = QApplication.instance()
+        if app is not None:
+            app.screenRemoved.connect(lambda _s: QTimer.singleShot(200, self._ensure_on_screen))
+            app.primaryScreenChanged.connect(lambda _s: QTimer.singleShot(200, self._ensure_on_screen))
 
     # ---------- Animated properties ----------
 
@@ -568,7 +771,10 @@ class FloatingRecorderWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedSize(CIRCLE_SIZE, CIRCLE_SIZE)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setToolTip("Clicca per registrare — trascina per spostare")
+        self.setToolTip(_IDLE_TOOLTIP)
+        # Keyboard: reachable once activated (tray → "Mostra il widget").
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Orizon Call")
 
         self._hover_anim = QPropertyAnimation(self, b"hover_progress")
         self._hover_anim.setDuration(180)
@@ -593,14 +799,17 @@ class FloatingRecorderWidget(QWidget):
 
         self._mute_btn = IconButton("mic", self)
         self._mute_btn.setToolTip("Silenzia microfono")
+        self._mute_btn.setAccessibleName("Silenzia microfono")
         self._mute_btn.clicked.connect(self._toggle_mute)
 
         self._pause_btn = IconButton("pause", self)
         self._pause_btn.setToolTip("Pausa")
+        self._pause_btn.setAccessibleName("Pausa")
         self._pause_btn.clicked.connect(self._toggle_pause)
 
         self._stop_btn = IconButton("stop", self)
         self._stop_btn.setToolTip("Stop e salva")
+        self._stop_btn.setAccessibleName("Stop e salva")
         # Lambda: clicked(checked) must not leak into quit_after.
         self._stop_btn.clicked.connect(lambda: self._handle_stop())
 
@@ -647,27 +856,35 @@ class FloatingRecorderWidget(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if sys.platform == 'darwin':
-            self._set_macos_floating_level()
-        elif sys.platform == 'linux' and self._raise_timer is None:
-            # Wayland workaround: periodically raise window to stay on top.
+            apply_macos_floating(self)
+        elif (sys.platform == 'linux' and self._raise_timer is None
+              and QApplication.platformName().lower().startswith('wayland')):
+            # Native Wayland: WindowStaysOnTopHint is not honoured by every
+            # compositor; periodically re-raise. Not on X11/XWayland, where
+            # the hint works and a periodic raise would pop the widget over
+            # open menus and dialogs.
             self._raise_timer = QTimer(self)
             self._raise_timer.setInterval(5000)
-            self._raise_timer.timeout.connect(self.raise_)
+            self._raise_timer.timeout.connect(self._periodic_raise)
             self._raise_timer.start()
 
-    def _set_macos_floating_level(self) -> None:
-        try:
-            from AppKit import NSApplication, NSFloatingWindowLevel
-            # NSWindowCollectionBehavior: CanJoinAllSpaces = 1 << 0,
-            # FullScreenAuxiliary = 1 << 8 (NOT 1 << 4, which is
-            # 'Stationary' and would drop the widget from fullscreen apps).
-            behavior = (1 << 0) | (1 << 8)
-            ns_app = NSApplication.sharedApplication()
-            for window in ns_app.windows():
-                window.setLevel_(NSFloatingWindowLevel)
-                window.setCollectionBehavior_(behavior)
-        except Exception:
-            pass
+    def _periodic_raise(self) -> None:
+        if QApplication.activeModalWidget() is None and QApplication.activePopupWidget() is None:
+            self.raise_()
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.toggle_recording()
+        elif key == Qt.Key.Key_P:
+            self.toggle_pause()
+        elif key == Qt.Key.Key_M:
+            if self._recorder.state in (RecordingState.RECORDING, RecordingState.PAUSED):
+                self._toggle_mute()
+        elif key == Qt.Key.Key_Escape:
+            self.clearFocus()
+        else:
+            super().keyPressEvent(event)
 
     # ---------- Painting ----------
 
@@ -834,6 +1051,7 @@ class FloatingRecorderWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             if self._is_dragging:
                 self._settings.setValue("widget/pos", self.pos())
+                self._settings.sync()  # survive os._exit / session end
             else:
                 self._handle_click()
             self._drag_pos = None
@@ -888,18 +1106,151 @@ class FloatingRecorderWidget(QWidget):
         menu.exec(event.globalPos())
 
     def _open_settings(self) -> None:
-        if self._recorder.state != RecordingState.IDLE or self._busy:
+        if self._recorder.state != RecordingState.IDLE or self._busy or self._settings_dialog_open:
             return
         from settings_dialog import open_settings
-        if open_settings(self, self._recorder):
-            Toast("Impostazioni salvate.", kind="info").show_above(self)
+        import app_settings
+        self._settings_dialog_open = True
+        try:
+            # The dialog runs a nested event loop: a queued API /start or a
+            # tray click can start a recording meanwhile, so it only
+            # persists and we apply here, after re-checking the state.
+            values = open_settings(
+                self, self._recorder, apply=False,
+                before_exec=lambda dlg: apply_macos_floating(dlg, activate=True))
+        finally:
+            self._settings_dialog_open = False
+        if not values:
+            return
+        if self._recorder.state == RecordingState.IDLE and not self._busy:
+            app_settings.apply_to_recorder(self._recorder, values)
+            self._pending_settings = None
+            if values.get("system_audio") and not self._recorder.has_system_audio:
+                Toast("Impostazioni salvate.\nAudio di sistema non disponibile su questo "
+                      "computer: verrà registrato solo il microfono (vedi il log).",
+                      kind="warn", duration_ms=7000).show_above(self)
+            else:
+                Toast("Impostazioni salvate.", kind="info").show_above(self)
+        else:
+            self._pending_settings = values
+            Toast("Impostazioni salvate: valgono dalla prossima registrazione.",
+                  kind="info").show_above(self)
 
-    # ---------- Public API (used by api_server.py) ----------
+    def _apply_pending_settings(self) -> None:
+        if self._pending_settings is None:
+            return
+        import app_settings
+        values, self._pending_settings = self._pending_settings, None
+        try:
+            app_settings.apply_to_recorder(self._recorder, values)
+        except Exception:
+            log.exception("Applying saved settings failed")
 
-    def wait_for_status_change(self, timeout: float = 1.0) -> None:
+    def notify(self, message: str, kind: str = "warn", duration_ms: int = 6000) -> None:
+        """Toast + native notification (tray) for events the user may not
+        be looking at the widget for."""
+        Toast(message, kind=kind, duration_ms=duration_ms).show_above(self)
+        self._tray.notify("Orizon Call", message, critical=(kind == "error"))
+
+    def closeEvent(self, event) -> None:
+        """Window-manager close (Alt+F4, session logout, 'close' from a
+        window list): never let it kill a recording. Route through the
+        normal quit path (stop + save first, confirmation when a recording
+        is running) and keep the widget alive until that has completed."""
+        if self._closing:
+            event.accept()
+            return
+        event.ignore()
+        self._quit_app(confirm=True)
+
+    @pyqtSlot()
+    def shutdown(self) -> None:
+        """aboutToQuit hook: stop timers, drop the tray icon and run the
+        recorder's last-resort finalization (a no-op when idle)."""
+        self._closing = True
+        try:
+            self._update_timer.stop()
+            if self._raise_timer is not None:
+                self._raise_timer.stop()
+            self._tray.hide()
+        except Exception:
+            pass
+        try:
+            self._recorder.emergency_save()
+        except Exception:
+            log.exception("Emergency save at quit failed")
+
+    # ---------- Public API (tray icon, signal handler, api_server.py) ----------
+
+    @property
+    def is_busy(self) -> bool:
+        """A start/stop worker is in flight."""
+        return self._busy
+
+    @pyqtSlot()
+    def request_quit(self) -> None:
+        """Quit without asking: stop + save (incl. MP3/normalization), then
+        exit. Used for SIGINT/SIGTERM and the REST API."""
+        self._quit_app(confirm=False)
+
+    @pyqtSlot()
+    def request_quit_interactive(self) -> None:
+        self._quit_app(confirm=True)
+
+    @pyqtSlot()
+    def toggle_recording(self) -> None:
+        state = self._recorder.state
+        if state in (RecordingState.RECORDING, RecordingState.PAUSED):
+            self._handle_stop()
+        elif state == RecordingState.IDLE and not self._busy:
+            self._start_recording()
+
+    @pyqtSlot()
+    def toggle_pause(self) -> None:
+        self._toggle_pause()
+
+    @pyqtSlot()
+    def open_settings(self) -> None:
+        self._open_settings()
+
+    @pyqtSlot()
+    def open_recordings_folder(self) -> None:
+        self._open_recordings_folder()
+
+    def _ensure_on_screen(self) -> None:
+        """Relocate the widget if no current screen shows it (monitor
+        unplugged, resolution change). Keeps the animation anchor in sync."""
+        geo = self.geometry()
+        on_screen = any(s.availableGeometry().intersects(geo) for s in QApplication.screens())
+        if on_screen:
+            return
+        screen = _screen_for(QCursor.pos())
+        if screen:
+            avail = screen.availableGeometry()
+            self.move(avail.right() - self.width() - 30, avail.bottom() - self.height() - 80)
+            self._settings.setValue("widget/pos", self.pos())
+            self._settings.sync()
+        geo = self.geometry()
+        self._center_anchor = QPointF(geo.center().x(), geo.center().y())
+
+    @pyqtSlot()
+    def bring_to_front(self) -> None:
+        """Make sure the widget is on a visible screen and on top (tray
+        'Mostra il widget'). A widget left on an unplugged monitor is moved
+        to the screen under the cursor."""
+        self._ensure_on_screen()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
+    def wait_for_status_change(self, timeout: float = 1.0,
+                               since: "int | None" = None) -> int:
         """Block until the recorder state (or mic mute) changes, or the
-        timeout expires. Elapsed time and levels keep riding the timeout."""
-        self._recorder.wait_for_state_change(timeout)
+        timeout expires. Elapsed time and levels keep riding the timeout.
+        Returns a change sequence number; pass it back as ``since`` to
+        return immediately if a change already happened (no lost wake-ups)."""
+        return self._recorder.wait_for_state_change(timeout, since)
 
     def recorder_status(self) -> dict:
         """Snapshot of recorder state — safe to call from any thread."""
@@ -913,6 +1264,7 @@ class FloatingRecorderWidget(QWidget):
             "sys_level": round(rec.sys_level, 4),
             "muted": rec.is_mic_muted,
             "dropped_chunks": rec.dropped_chunks,
+            "input_overflows": rec.input_overflows,
             "segments": [str(p) for p in rec.segment_paths],
         }
 
@@ -963,6 +1315,7 @@ class FloatingRecorderWidget(QWidget):
         which can take seconds) must never block the GUI."""
         if self._busy or self._recorder.state != RecordingState.IDLE:
             return
+        self._apply_pending_settings()
         self._busy = True
         self._start_interactive = interactive
         self.setToolTip("")
@@ -985,19 +1338,26 @@ class FloatingRecorderWidget(QWidget):
             self._level_bar.reset()
             self._expand_to_pill()
             self.recording_started.emit(payload)
-            if self._pending_stop:
-                # A stop (e.g. via API) arrived while the start worker ran:
-                # honor it now that the recording actually exists.
+            if self._pending_stop or self._quit_when_done:
+                # A stop or a quit (API, menu, signal) arrived while the
+                # start worker ran: honor it now that the recording exists
+                # — and consume the quit flag here, otherwise it would
+                # fire after some later, unrelated stop.
                 self._pending_stop = False
-                QTimer.singleShot(0, lambda: self._handle_stop())
+                quit_after = self._quit_when_done
+                self._quit_when_done = False
+                QTimer.singleShot(0, lambda: self._handle_stop(quit_after=quit_after))
         else:
             self._pending_stop = False
-            self.setToolTip("Clicca per registrare — trascina per spostare")
-            if getattr(self, "_start_interactive", True):
+            self.setToolTip(_IDLE_TOOLTIP)
+            non_interactive_quit = self._quit_when_done and not self._quit_interactive
+            if getattr(self, "_start_interactive", True) and not non_interactive_quit:
                 self._show_start_error(payload)
             else:
-                Toast(f"Impossibile avviare la registrazione: {payload}",
-                      kind="error").show_above(self)
+                # Nobody is looking at the widget (API/tray/signal start):
+                # a persistent native notification, not a 3 s toast only.
+                self.notify(f"Impossibile avviare la registrazione: {payload}",
+                            kind="error", duration_ms=8000)
             if self._quit_when_done:
                 self._quit_when_done = False
                 QApplication.quit()
@@ -1009,7 +1369,14 @@ class FloatingRecorderWidget(QWidget):
         box.setText("La registrazione non è stata avviata.")
         box.setInformativeText(message)
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        box.exec()
+        self._exec_dialog(box)
+
+    @staticmethod
+    def _exec_dialog(box) -> int:
+        """Run a modal dialog that is visible over fullscreen apps and in
+        front of the active application on macOS (accessory app)."""
+        QTimer.singleShot(0, lambda: apply_macos_floating(box, activate=True))
+        return box.exec()
 
     @pyqtSlot()
     def _toggle_pause(self) -> None:
@@ -1040,7 +1407,13 @@ class FloatingRecorderWidget(QWidget):
             # a stop, _quit_when_done above is all we needed to record.
             self._pending_stop = True
             return
-        if self._recorder.state not in (RecordingState.RECORDING, RecordingState.PAUSED):
+        state = self._recorder.state
+        if state == RecordingState.STOPPING:
+            # The recorder is finalizing on its own (auto-stop with
+            # post-processing): leave the quit armed, _tick completes it
+            # once the recorder is idle — never kill ffmpeg mid-file.
+            return
+        if state not in (RecordingState.RECORDING, RecordingState.PAUSED):
             if self._quit_when_done:
                 self._quit_when_done = False
                 QApplication.quit()
@@ -1075,17 +1448,19 @@ class FloatingRecorderWidget(QWidget):
         self._stop_btn.setEnabled(True)
         self._status_dot.stop_pulsing(COLOR_WHITE_DIM)
         self._shrink_to_circle()
-        self.setToolTip("Clicca per registrare — trascina per spostare")
+        self.setToolTip(_IDLE_TOOLTIP)
+        # A mute must never carry over silently into the next call.
+        self._set_mute(False)
 
         if ok and payload:
             self.recording_stopped.emit(payload)
-            from pathlib import Path as _P
-            name = _P(payload).name
+            name = Path(payload).name
             if not quit_after:
                 Toast(f"Salvato: {name}\nClicca per aprire la cartella",
                       on_click=self._open_recordings_folder).show_above(self)
         elif not ok:
-            if quit_after:
+            self._tray.notify("Orizon Call — errore di salvataggio", payload, critical=True)
+            if quit_after and self._quit_interactive:
                 # A toast would die with the process: the failure must be
                 # seen before we exit.
                 box = QMessageBox(self)
@@ -1093,7 +1468,11 @@ class FloatingRecorderWidget(QWidget):
                 box.setWindowTitle("Orizon Call — Errore di salvataggio")
                 box.setText("Errore durante il salvataggio della registrazione.")
                 box.setInformativeText(payload)
-                box.exec()
+                self._exec_dialog(box)
+            elif quit_after:
+                # Non-interactive quit (API, SIGTERM): never block on a
+                # dialog nobody will click — the log/notification carry it.
+                log.error("Save failed while quitting: %s", payload)
             else:
                 Toast(f"Errore durante il salvataggio: {payload}",
                       kind="error", duration_ms=6000).show_above(self)
@@ -1112,10 +1491,10 @@ class FloatingRecorderWidget(QWidget):
         self.mute_changed.emit(muted)
 
     def recordings_dir(self) -> Path:
-        """Current destination folder (follows live settings changes).
-        Also used by api_server for /files, so the REST API always serves
-        the same folder the app is saving into."""
-        return self._recorder._output_dir or (Path.home() / "Downloads")
+        """Current destination folder (follows live settings changes and
+        the recorder's fallbacks). Also used by api_server for /files, so
+        the REST API always serves the same folder the app is saving into."""
+        return self._recorder.output_directory
 
     def _open_recordings_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.recordings_dir())))
@@ -1126,9 +1505,11 @@ class FloatingRecorderWidget(QWidget):
     def _quit_app(self, confirm: bool = False) -> None:
         """Quit, stopping and saving any recording first (asynchronously —
         quit must not freeze the UI either)."""
+        self._quit_interactive = confirm
         if self._busy or self._recorder.state == RecordingState.STOPPING:
-            # A save is already in flight: don't kill its worker thread —
-            # exit as soon as it completes.
+            # A start or a save is already in flight: don't kill its worker
+            # thread — exit as soon as it completes (_on_start_done turns
+            # this into a stop, _on_stop_done into the actual quit).
             self._quit_when_done = True
             return
         state = self._recorder.state
@@ -1143,7 +1524,7 @@ class FloatingRecorderWidget(QWidget):
                                        | QMessageBox.StandardButton.Cancel)
                 box.button(QMessageBox.StandardButton.Yes).setText("Salva ed esci")
                 box.button(QMessageBox.StandardButton.Cancel).setText("Annulla")
-                if box.exec() != QMessageBox.StandardButton.Yes:
+                if self._exec_dialog(box) != QMessageBox.StandardButton.Yes:
                     return
             # State may have changed while the dialog was open (API stop):
             # _handle_stop handles every case, including quitting directly
@@ -1206,6 +1587,7 @@ class FloatingRecorderWidget(QWidget):
 
     def _tick(self) -> None:
         state = self._recorder.state
+        self._tray.set_state(state.name.lower(), self._busy)
 
         # Reconcile: the recorder can stop itself (disk full, devices lost,
         # emergency save). Never leave a stuck 'recording' pill behind.
@@ -1214,7 +1596,8 @@ class FloatingRecorderWidget(QWidget):
             self._ui_recording = False
             self._status_dot.stop_pulsing(COLOR_WHITE_DIM)
             self._shrink_to_circle()
-            self.setToolTip("Clicca per registrare — trascina per spostare")
+            self.setToolTip(_IDLE_TOOLTIP)
+            self._set_mute(False)
             path = self._recorder.output_path
             if path:
                 self.recording_stopped.emit(str(path))
@@ -1222,6 +1605,21 @@ class FloatingRecorderWidget(QWidget):
                       f"File salvato: {path.name}",
                       kind="warn", duration_ms=6000,
                       on_click=self._open_recordings_folder).show_above(self)
+                self._tray.notify("Orizon Call — registrazione interrotta",
+                                  f"File salvato: {path.name}", critical=True)
+            if self._quit_when_done:
+                # Quit requested while the recorder was finalizing on its
+                # own (auto-stop + post-processing): honour it now.
+                self._quit_when_done = False
+                QApplication.quit()
+            return
+
+        # A quit armed during a recorder-driven STOPPING (no widget worker
+        # to consume the flag) completes as soon as the recorder is idle.
+        if (self._quit_when_done and not self._busy
+                and state == RecordingState.IDLE):
+            self._quit_when_done = False
+            QApplication.quit()
             return
 
         if not self._ui_recording or self._busy:

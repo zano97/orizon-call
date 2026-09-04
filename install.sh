@@ -133,15 +133,52 @@ if [ -z "$PY" ]; then
 fi
 say "Python trovato: $("$PY" --version) ($PY)"
 
+# ldconfig sta in /sbin, che su Debian non è nel PATH degli utenti normali.
+LDCONFIG="$(command -v ldconfig 2>/dev/null || echo /sbin/ldconfig)"
+
 if [ "$OS" = "Linux" ]; then
     # PortAudio è la libreria di cattura audio usata dall'app (sounddevice).
-    if ! ldconfig -p 2>/dev/null | grep -q libportaudio; then
+    if ! "$LDCONFIG" -p 2>/dev/null | grep -q libportaudio; then
         warn "Libreria PortAudio non trovata: senza, l'app non può registrare."
         if ask "La installo adesso (serve sudo)?"; then
             pkg_install "libportaudio2" "portaudio" "portaudio" "portaudio" ||
                 warn "Installazione automatica fallita: installa 'libportaudio2' (Debian/Ubuntu) o 'portaudio' a mano."
         else
             warn "Ricordati di installarla: sudo apt install libportaudio2  (Debian/Ubuntu)"
+        fi
+    fi
+
+    # Qt 6 (PyQt6) carica il plugin grafico "xcb" solo se trova alcune
+    # librerie di sistema che i desktop minimali non hanno (in particolare
+    # libxcb-cursor0, obbligatoria da Qt 6.5): senza, l'app parte e muore
+    # subito con "Could not load the Qt platform plugin".
+    QT_MISSING=""
+    for lib in libxcb-cursor.so.0 libEGL.so.1 libxkbcommon-x11.so.0; do
+        "$LDCONFIG" -p 2>/dev/null | grep -q "$lib" || QT_MISSING="$QT_MISSING $lib"
+    done
+    # Audio di sistema: con il PortAudio delle distribuzioni (solo host API
+    # ALSA) il monitor di PulseAudio/PipeWire si cattura tramite il plugin
+    # ALSA "pulse": senza, l'app registra solo il microfono.
+    if ! find /usr/lib /usr/lib64 /usr/lib32 -name 'libasound_module_pcm_pulse.so' 2>/dev/null | grep -q .; then
+        warn "Plugin ALSA per PulseAudio/PipeWire non trovato: senza, niente audio di sistema (solo microfono)."
+        if ask "Lo installo adesso (serve sudo)?"; then
+            pkg_install "libasound2-plugins" "alsa-plugins-pulseaudio" "alsa-plugins" "alsa-plugins-pulse" ||
+                warn "Installazione automatica fallita: installa 'libasound2-plugins' (Debian/Ubuntu) o 'alsa-plugins-pulseaudio' (Fedora) a mano."
+        else
+            warn "Ricordati di installarlo: sudo apt install libasound2-plugins  (Debian/Ubuntu)"
+        fi
+    fi
+
+    if [ -n "$QT_MISSING" ]; then
+        warn "Mancano librerie grafiche richieste da Qt:$QT_MISSING"
+        if ask "Le installo adesso (serve sudo)?"; then
+            pkg_install "libxcb-cursor0 libegl1 libxkbcommon-x11-0 libdbus-1-3" \
+                        "xcb-util-cursor libglvnd-egl libxkbcommon-x11 dbus-libs" \
+                        "xcb-util-cursor libglvnd libxkbcommon-x11 dbus" \
+                        "libxcb-cursor0 libxkbcommon-x11-0 libdbus-1-3" ||
+                warn "Installazione automatica fallita: installa 'libxcb-cursor0 libegl1 libxkbcommon-x11-0' (Debian/Ubuntu) a mano."
+        else
+            warn "Ricordati di installarle: sudo apt install libxcb-cursor0 libegl1 libxkbcommon-x11-0  (Debian/Ubuntu)"
         fi
     fi
 fi
@@ -239,28 +276,41 @@ fi
 
 if [ ! -x "$VENV_DIR/bin/python" ]; then
     say "Creo l'ambiente Python isolato…"
-    if ! "$PY" -m venv "$VENV_DIR" 2>/dev/null; then
+    # --clear: un venv orfano (Python di sistema aggiornato) viene ricreato da zero.
+    if ! "$PY" -m venv --clear "$VENV_DIR" 2>/dev/null; then
         # Debian/Ubuntu senza python3-venv
         warn "Il modulo venv non è disponibile."
         if [ "$OS" = "Linux" ] && ask "Installo python3-venv (serve sudo)?"; then
             pkg_install "python3-venv" "python3" "python" "python3" || true
         fi
-        "$PY" -m venv "$VENV_DIR" || die "Impossibile creare il virtualenv. Installa python3-venv e rilancia."
+        "$PY" -m venv --clear "$VENV_DIR" || die "Impossibile creare il virtualenv. Installa python3-venv e rilancia."
     fi
 fi
 
 say "Installo le dipendenze (la prima volta può richiedere qualche minuto)…"
-"$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
+"$VENV_DIR/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade pip
+"$VENV_DIR/bin/python" -m pip install --quiet --disable-pip-version-check -r "$APP_DIR/requirements.txt"
 
-# Helper audio di sistema per macOS: nel repo c'è il binario precompilato;
-# se manca o non parte si può ricompilare con Xcode CLT (start.sh lo fa da solo).
-if [ "$OS" = "Darwin" ] && [ ! -x "$APP_DIR/helpers/system_audio_capture" ]; then
-    if command -v swiftc >/dev/null 2>&1; then
-        say "Compilo l'helper per l'audio di sistema…"
+# Helper audio di sistema per macOS: nel repo c'è il binario precompilato
+# (Apple Silicon). Se manca o è compilato per un'altra architettura (Mac
+# Intel) va ricompilato con gli Xcode Command Line Tools.
+# Nota: lipo/swiftc esistono sempre in /usr/bin come "shim" che, senza gli
+# Xcode Command Line Tools, aprono la finestra "installa gli strumenti":
+# l'architettura si legge con `file` (parte del sistema base) e la
+# compilazione si tenta solo se i CLT risultano davvero installati.
+_helper_ok() {
+    local bin="$1"
+    [ -x "$bin" ] || return 1
+    file "$bin" 2>/dev/null | grep -q "$(uname -m)" || return 1
+    return 0
+}
+_have_clt() { xcode-select -p >/dev/null 2>&1; }
+if [ "$OS" = "Darwin" ] && ! _helper_ok "$APP_DIR/helpers/system_audio_capture"; then
+    if _have_clt && command -v swiftc >/dev/null 2>&1; then
+        say "Compilo l'helper per l'audio di sistema per $(uname -m)…"
         (cd "$APP_DIR/helpers" && ./build.sh) || warn "Compilazione helper fallita: partirà in modalità solo-microfono."
     else
-        warn "Helper audio di sistema mancante e swiftc assente: audio di sistema non disponibile."
+        warn "Helper audio di sistema mancante (o non compilato per $(uname -m)) e swiftc assente: audio di sistema non disponibile."
         warn "Per abilitarlo: xcode-select --install  e poi rilancia l'installer."
     fi
 fi
@@ -293,7 +343,10 @@ if [ "$OS" = "Darwin" ]; then
     <key>CFBundleExecutable</key><string>orizon-call</string>
     <key>CFBundleIconFile</key><string>orizon-call</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>LSUIElement</key><false/>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Orizon Call registra il microfono durante le chiamate.</string>
 </dict></plist>
@@ -317,7 +370,7 @@ else
 Type=Application
 Name=Orizon Call
 Comment=Registratore di chiamate (microfono + audio di sistema)
-Exec=$LAUNCHER
+Exec="$LAUNCHER"
 Icon=orizon-call
 Terminal=false
 Categories=AudioVideo;Audio;Recorder;

@@ -8,7 +8,6 @@ or any platform audio support.
 from pathlib import Path
 import time
 
-import numpy as np
 import pytest
 
 from audio_recorder import AudioRecorder, RecordingState

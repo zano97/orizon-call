@@ -34,8 +34,69 @@ def _helper_binary_path() -> Path:
     return Path(__file__).resolve().parent / "helpers" / "system_audio_capture"
 
 
+# Mach-O cputype values (CPU_ARCH_ABI64 flag included) per host machine.
+_MACHO_CPUTYPES = {"arm64": 0x0100000C, "x86_64": 0x01000007}
+_MACHO_MAGIC_64_LE = b"\xcf\xfa\xed\xfe"
+_MACHO_MAGIC_64_BE = b"\xfe\xed\xfa\xcf"
+_FAT_MAGICS = (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+_arch_warned = False
+
+
+def _process_is_translated() -> bool:
+    """True when this Python runs under Rosetta 2 on Apple Silicon (an
+    x86_64 Homebrew/conda interpreter): the host CPU is arm64 and a native
+    arm64 helper can be spawned just fine."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "sysctl.proc_translated"],
+                             capture_output=True, timeout=2)
+        return out.returncode == 0 and out.stdout.strip() == b"1"
+    except Exception:
+        return False
+
+
+def binary_matches_host(path: Path, machine: Optional[str] = None,
+                        translated: Optional[bool] = None) -> bool:
+    """True if the Mach-O at ``path`` can run on this CPU. The committed
+    helper is a thin arm64 binary: on an Intel Mac execv would fail with
+    'Bad CPU type in executable' at every recording start, so the helper
+    must be reported unavailable there (mic-only / BlackHole fallback,
+    with a hint to rebuild) instead of aborting each start(). A Rosetta-
+    translated interpreter on Apple Silicon can still run the arm64 helper."""
+    machine = machine or platform.machine()
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except OSError:
+        return False
+    if len(head) < 8:
+        return False
+    magic = head[:4]
+    if magic in _FAT_MAGICS:
+        return True  # universal binary
+    want = _MACHO_CPUTYPES.get(machine)
+    if want is None:
+        return True  # unknown host architecture: let exec decide
+    runnable = {want}
+    if machine == "x86_64":
+        if translated is None:
+            translated = _process_is_translated()
+        if translated:
+            runnable.add(_MACHO_CPUTYPES["arm64"])
+    if magic == _MACHO_MAGIC_64_LE:
+        cputype = int.from_bytes(head[4:8], "little")
+    elif magic == _MACHO_MAGIC_64_BE:
+        cputype = int.from_bytes(head[4:8], "big")
+    else:
+        return True  # not a Mach-O header we recognise (script wrapper?)
+    return cputype in runnable
+
+
 def is_available() -> bool:
-    """True if we are on macOS 13+ and the helper binary is present and executable."""
+    """True if we are on macOS 13+ and the helper binary is present,
+    executable and built for this CPU architecture."""
+    global _arch_warned
     if sys.platform != "darwin":
         return False
     try:
@@ -45,7 +106,17 @@ def is_available() -> bool:
     except Exception:
         return False
     binary = _helper_binary_path()
-    return binary.is_file() and os.access(binary, os.X_OK)
+    if not (binary.is_file() and os.access(binary, os.X_OK)):
+        return False
+    if not binary_matches_host(binary):
+        if not _arch_warned:
+            _arch_warned = True
+            log.warning(
+                "System audio helper %s is not built for this CPU (%s). "
+                "Rebuild it with: cd helpers && ./build.sh (Xcode Command Line Tools).",
+                binary, platform.machine())
+        return False
+    return True
 
 
 class SCKAudioSource:
