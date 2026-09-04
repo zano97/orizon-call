@@ -49,19 +49,18 @@ def _try_bind_or_explain(port: int) -> "socket.socket | None":
     import errno
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if sys.platform == "win32":
-        # Winsock semantics differ: SO_REUSEADDR would let a second
-        # instance bind OVER the live listener (two apps on one port).
-        # SO_EXCLUSIVEADDRUSE makes that bind fail with EADDRINUSE/EACCES,
-        # which the probe below then explains.
-        s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", 0x4004), 1)
-    else:
-        # Allow rebinding over TIME_WAIT remnants of a previous run
-        # (instant app restart). Does not weaken the single-instance
-        # check: binding over a LIVE listener still fails without
-        # SO_REUSEPORT.
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
+        if sys.platform != "win32":
+            # Allow rebinding over TIME_WAIT remnants of a previous run
+            # (instant app restart). Does not weaken the single-instance
+            # check: binding over a LIVE listener still fails without
+            # SO_REUSEPORT.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Windows (Winsock): deliberately NO option. SO_REUSEADDR there
+        # would let a second instance bind over the live listener, while
+        # SO_EXCLUSIVEADDRUSE would refuse an instant restart while old
+        # connections linger in TIME_WAIT. The default already rejects a
+        # second listener and allows the restart.
         s.bind(("127.0.0.1", port))
         return s
     except OSError as e:

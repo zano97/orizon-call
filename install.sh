@@ -294,16 +294,19 @@ say "Installo le dipendenze (la prima volta può richiedere qualche minuto)…"
 # Helper audio di sistema per macOS: nel repo c'è il binario precompilato
 # (Apple Silicon). Se manca o è compilato per un'altra architettura (Mac
 # Intel) va ricompilato con gli Xcode Command Line Tools.
+# Nota: lipo/swiftc esistono sempre in /usr/bin come "shim" che, senza gli
+# Xcode Command Line Tools, aprono la finestra "installa gli strumenti":
+# l'architettura si legge con `file` (parte del sistema base) e la
+# compilazione si tenta solo se i CLT risultano davvero installati.
 _helper_ok() {
     local bin="$1"
     [ -x "$bin" ] || return 1
-    if command -v lipo >/dev/null 2>&1; then
-        lipo -archs "$bin" 2>/dev/null | grep -qw "$(uname -m)" || return 1
-    fi
+    file "$bin" 2>/dev/null | grep -q "$(uname -m)" || return 1
     return 0
 }
+_have_clt() { xcode-select -p >/dev/null 2>&1; }
 if [ "$OS" = "Darwin" ] && ! _helper_ok "$APP_DIR/helpers/system_audio_capture"; then
-    if command -v swiftc >/dev/null 2>&1; then
+    if _have_clt && command -v swiftc >/dev/null 2>&1; then
         say "Compilo l'helper per l'audio di sistema per $(uname -m)…"
         (cd "$APP_DIR/helpers" && ./build.sh) || warn "Compilazione helper fallita: partirà in modalità solo-microfono."
     else

@@ -429,7 +429,7 @@ class TestApiHardening:
             assert False, "expected HTTP 500"
         except urllib.error.HTTPError as e:
             assert e.code == 500
-            assert json.loads(e.read()) == {"error": "internal error"}
+            assert json.loads(e.read()) == {"error": "internal error", "code": 500}
 
     def test_stop_api_server_accepts_none(self):
         from api_server import stop_api_server

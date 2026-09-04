@@ -1144,3 +1144,117 @@ class TestWidgetQuitDuringUnattendedStop:
         r._state = RecordingState.IDLE
         w._tick()
         assert quits == [1] and w._quit_when_done is False
+
+
+class TestDiffReviewRoundTwo:
+
+    @pytest.fixture()
+    def server(self, qapp, tmp_path):
+        import socket
+        from tests.test_api_server import FakeWidget
+        from api_server import RecorderAPIHandler, start_api_server, stop_api_server
+        widget = FakeWidget()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        srv = start_api_server(widget, port=port, output_dir=tmp_path,
+                               require_auth=True, bound_socket=sock)
+        yield {"port": port, "widget": widget, "token": RecorderAPIHandler.auth_token,
+               "dir": tmp_path}
+        stop_api_server(srv)
+
+    def _raw(self, port, request: bytes) -> bytes:
+        import socket
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(request)
+            data = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        return data
+
+    def test_stdlib_error_bodies_are_valid_json(self, server):
+        data = self._raw(server["port"], b'PU"T /start HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
+        head, _, body = data.partition(b"\r\n\r\n")
+        assert head.startswith(b"HTTP/1.0 501")
+        parsed = json.loads(body)
+        assert parsed["code"] == 501 and "PU" in parsed["error"]
+        # A request whose version cannot be parsed is answered HTTP/0.9
+        # style by http.server (body only, no status line): the body must
+        # still be valid JSON — the message contains quotes and escapes.
+        data = self._raw(server["port"], b"GET /start HTTP/1.\x01\r\nHost: 127.0.0.1\r\n\r\n")
+        body = data.partition(b"\r\n\r\n")[2] or data
+        parsed = json.loads(body)
+        assert parsed["code"] == 400 and "Bad request version" in parsed["error"]
+
+    def test_application_errors_carry_code(self, server):
+        req = urllib.request.Request(f"http://127.0.0.1:{server['port']}/status")
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False
+        except urllib.error.HTTPError as e:
+            assert json.loads(e.read()) == {"error": "missing bearer token", "code": 401}
+
+    def test_absurd_range_is_ignored_not_500(self, server):
+        f = server["dir"] / "recording_big.wav"
+        f.write_bytes(b"abcdef")
+        req = urllib.request.Request(f"http://127.0.0.1:{server['port']}/files/recording_big.wav")
+        req.add_header("Authorization", f"Bearer {server['token']}")
+        req.add_header("Range", "bytes=" + "9" * 5000 + "-")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200 and resp.read() == b"abcdef"
+
+    def test_bind_without_options_on_windows(self, monkeypatch):
+        import socket
+        import main as main_mod
+        calls = []
+        real_socket = socket.socket
+
+        class Spy(real_socket):
+            def setsockopt(self, *args):
+                calls.append(args)
+                return super().setsockopt(*args)
+        monkeypatch.setattr(main_mod.socket, "socket", Spy)
+        monkeypatch.setattr(main_mod.sys, "platform", "win32")
+        sock = main_mod._try_bind_or_explain(0)
+        assert sock is not None
+        sock.close()
+        assert calls == []          # no SO_REUSEADDR, no SO_EXCLUSIVEADDRUSE
+
+
+class TestWidgetQuitEdgeCases:
+
+    @pytest.fixture()
+    def widget(self, qapp, tmp_path):
+        from floating_widget import FloatingRecorderWidget
+        r = AudioRecorder()
+        r.set_output_directory(tmp_path)
+        w = FloatingRecorderWidget(r)
+        yield w, r
+        w.shutdown()
+        w.close()
+
+    def test_save_and_quit_waits_for_unattended_finalization(self, widget, monkeypatch):
+        import floating_widget
+        w, r = widget
+        quits = []
+        monkeypatch.setattr(floating_widget.QApplication, "quit", staticmethod(lambda: quits.append(1)))
+        r._state = RecordingState.STOPPING          # auto-stop is converting to MP3
+        w._handle_stop(quit_after=True)             # user clicked "Salva ed esci"
+        assert quits == [] and w._quit_when_done is True
+        r._state = RecordingState.IDLE
+        w._tick()
+        assert quits == [1]
+
+    def test_start_failure_never_blocks_a_non_interactive_quit(self, widget, monkeypatch):
+        import floating_widget
+        w, r = widget
+        monkeypatch.setattr(w, "_show_start_error", lambda msg: pytest.fail("modal shown"))
+        quits = []
+        monkeypatch.setattr(floating_widget.QApplication, "quit", staticmethod(lambda: quits.append(1)))
+        w._start_interactive = True                 # the user clicked the circle...
+        w._quit_when_done, w._quit_interactive = True, False   # ...then SIGTERM arrived
+        w._on_start_done(False, "helper timed out")
+        assert quits == [1]

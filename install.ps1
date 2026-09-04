@@ -59,9 +59,26 @@ function Update-UserPath {
         }
         if ($changed) {
             $key.SetValue('Path', ($parts -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            Send-EnvironmentChange
         }
         return $changed
     } finally { $key.Close() }
+}
+
+# Avvisa Explorer che l'ambiente e' cambiato (WM_SETTINGCHANGE), come fa
+# [Environment]::SetEnvironmentVariable: altrimenti i terminali aperti dal
+# menu Start non vedono `orizon-call` fino al prossimo accesso.
+function Send-EnvironmentChange {
+    try {
+        if (-not ('OrizonCall.NativeMethods' -as [type])) {
+            Add-Type -Namespace OrizonCall -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+        }
+        $result = [UIntPtr]::Zero
+        [void][OrizonCall.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+    } catch { }
 }
 
 # ── Disinstallazione ─────────────────────────────────────────────────────────

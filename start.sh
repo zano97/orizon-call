@@ -34,8 +34,10 @@ if [ ! -x "$VENV/bin/python" ]; then
     rm -f "$STAMP"
 fi
 
-# Il timbro vale solo se i pacchetti si importano davvero.
-if [ -f "$STAMP" ] && ! "$VENV/bin/python" -c 'import PyQt6, sounddevice, soundfile, soxr, numpy' >/dev/null 2>&1; then
+# Il timbro vale solo se i pacchetti sono davvero installati (controllo
+# senza importarli: sounddevice fallirebbe senza PortAudio, che è un altro
+# problema, segnalato più sotto, e non deve far reinstallare tutto).
+if [ -f "$STAMP" ] && ! "$VENV/bin/python" -c 'import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in ("PyQt6", "sounddevice", "soundfile", "soxr", "numpy")) else 1)' >/dev/null 2>&1; then
     rm -f "$STAMP"
 fi
 
@@ -67,16 +69,16 @@ if [ "$(uname)" = "Linux" ] && ! "$LDCONFIG" -p 2>/dev/null | grep -q libxcb-cur
 fi
 
 # Helper audio di sistema (macOS): compila se manca o se il binario nel repo
-# (Apple Silicon) non è per questa architettura (Mac Intel).
+# (Apple Silicon) non è per questa architettura (Mac Intel). lipo/swiftc sono
+# shim che senza Xcode CLT aprono un prompt: si usa `file` e si compila solo
+# con i CLT davvero installati.
 _helper_ok() {
     [ -x helpers/system_audio_capture ] || return 1
-    if command -v lipo >/dev/null 2>&1; then
-        lipo -archs helpers/system_audio_capture 2>/dev/null | grep -qw "$(uname -m)" || return 1
-    fi
+    file helpers/system_audio_capture 2>/dev/null | grep -q "$(uname -m)" || return 1
     return 0
 }
 if [ "$(uname)" = "Darwin" ] && ! _helper_ok; then
-    if command -v swiftc >/dev/null 2>&1; then
+    if xcode-select -p >/dev/null 2>&1 && command -v swiftc >/dev/null 2>&1; then
         echo "• Compilo l'helper per l'audio di sistema…"
         (cd helpers && ./build.sh)
     else

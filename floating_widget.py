@@ -1350,7 +1350,8 @@ class FloatingRecorderWidget(QWidget):
         else:
             self._pending_stop = False
             self.setToolTip(_IDLE_TOOLTIP)
-            if getattr(self, "_start_interactive", True):
+            non_interactive_quit = self._quit_when_done and not self._quit_interactive
+            if getattr(self, "_start_interactive", True) and not non_interactive_quit:
                 self._show_start_error(payload)
             else:
                 # Nobody is looking at the widget (API/tray/signal start):
@@ -1406,7 +1407,13 @@ class FloatingRecorderWidget(QWidget):
             # a stop, _quit_when_done above is all we needed to record.
             self._pending_stop = True
             return
-        if self._recorder.state not in (RecordingState.RECORDING, RecordingState.PAUSED):
+        state = self._recorder.state
+        if state == RecordingState.STOPPING:
+            # The recorder is finalizing on its own (auto-stop with
+            # post-processing): leave the quit armed, _tick completes it
+            # once the recorder is idle — never kill ffmpeg mid-file.
+            return
+        if state not in (RecordingState.RECORDING, RecordingState.PAUSED):
             if self._quit_when_done:
                 self._quit_when_done = False
                 QApplication.quit()

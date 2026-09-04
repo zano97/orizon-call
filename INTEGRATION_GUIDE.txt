@@ -155,10 +155,11 @@ Host-header validation: requests whose Host is not localhost/127.0.0.1/::1
 are rejected with 403 (protects against DNS-rebinding pages even when
 --no-auth is used).
 
-HEAD is supported on every GET endpoint. Unsupported methods and malformed
-requests get the same JSON error shape ({"error": ..., "code": ...}) as
-application errors; a missing token answers 401 with a
-`WWW-Authenticate: Bearer` challenge. The auth scheme is matched
+HEAD is supported on every GET endpoint. Every error — application errors
+and the ones the HTTP layer raises for malformed requests or unsupported
+methods — has the shape {"error": "<message>", "code": <http status>}
+(state-conflict errors also carry "state"); a missing token answers 401
+with a `WWW-Authenticate: Bearer` challenge. The auth scheme is matched
 case-insensitively ("Bearer"/"bearer").
 
 ------------------------------------------------------------------------------
@@ -495,13 +496,16 @@ directly). All requests below send the Authorization header.
 HTTP Status Codes:
   200  Success
   204  CORS preflight OK (OPTIONS)
+  206  Partial content (Range request on GET /files/<name>)
   400  Bad request (invalid filename)
   401  Unauthorized (missing bearer token)
   403  Forbidden (invalid token, disallowed Host header, or access to a
        non-recording file)
   404  Not found (unknown endpoint or file)
   409  Conflict (wrong state for the requested action)
-  500  Internal error ({"error": "internal error"} — details in the app log)
+  416  Range not satisfiable (GET /files/<name>)
+  500  Internal error ({"error": "internal error", "code": 500} — details in the app log)
+  501  Unsupported HTTP method
   503  Recorder not ready (app still initializing) or too many SSE streams
 
 Connection refused (fetch throws TypeError/NetworkError):
