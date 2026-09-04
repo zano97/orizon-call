@@ -10,7 +10,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 import pytest
 
@@ -30,8 +29,9 @@ class FakeWidget(QObject):
     def recorder_state_name(self) -> str:
         return self.state_name
 
-    def wait_for_status_change(self, timeout: float = 1.0) -> None:
+    def wait_for_status_change(self, timeout: float = 1.0, since=None):
         threading.Event().wait(min(timeout, 0.05))
+        return None
 
     def recorder_status(self) -> dict:
         return {
@@ -234,8 +234,13 @@ class TestEvents:
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
             assert resp.headers["Content-Type"].startswith("text/event-stream")
+            # The stream opens with a `retry:` reconnect hint (SSE field),
+            # then the first status frame.
+            first = resp.readline().decode()
+            assert first.startswith("retry: ")
             line = resp.readline().decode()
-            assert line.startswith("data: ")
+            while not line.startswith("data: "):
+                line = resp.readline().decode()
             payload = json.loads(line[len("data: "):])
             assert payload["state"] == "idle"
 

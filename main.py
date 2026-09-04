@@ -14,11 +14,13 @@ Usage:
 """
 
 import argparse
+import json
+import os
 import socket
 import sys
 from pathlib import Path
 
-from orizon_logging import setup_logging, get_logger
+from orizon_logging import setup_logging, get_logger, install_thread_excepthook
 
 log = get_logger("main")
 
@@ -47,10 +49,18 @@ def _try_bind_or_explain(port: int) -> "socket.socket | None":
     import errno
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Allow rebinding over TIME_WAIT remnants of a previous run (instant
-    # app restart). Does not weaken the single-instance check: binding
-    # over a LIVE listener still fails without SO_REUSEPORT.
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if sys.platform == "win32":
+        # Winsock semantics differ: SO_REUSEADDR would let a second
+        # instance bind OVER the live listener (two apps on one port).
+        # SO_EXCLUSIVEADDRUSE makes that bind fail with EADDRINUSE/EACCES,
+        # which the probe below then explains.
+        s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", 0x4004), 1)
+    else:
+        # Allow rebinding over TIME_WAIT remnants of a previous run
+        # (instant app restart). Does not weaken the single-instance
+        # check: binding over a LIVE listener still fails without
+        # SO_REUSEPORT.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(("127.0.0.1", port))
         return s
@@ -77,13 +87,65 @@ def _try_bind_or_explain(port: int) -> "socket.socket | None":
 
 
 def _probe_is_orizon_call(port: int) -> bool:
+    """Is the service on <port> another Orizon Call? Ask /health (HTTP/1.0:
+    the server closes the connection after the reply) and read to EOF —
+    the headers alone exceed 256 bytes, so a single short recv() would
+    miss the body and misreport a running instance as a foreign service."""
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.5) as conn:
             conn.sendall(b"GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            data = conn.recv(256)
-        return b"200" in data and b"ok" in data
+            data = b""
+            while len(data) < 4096:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    break
+                data += chunk
     except (OSError, socket.timeout):
         return False
+    head, _, body = data.partition(b"\r\n\r\n")
+    status_line = head.split(b"\r\n", 1)[0]
+    if not status_line.startswith(b"HTTP/1.") or b" 200" not in status_line:
+        return False
+    try:
+        return json.loads(body.decode("utf-8", errors="replace") or "null") == {"ok": True}
+    except ValueError:
+        return False
+
+
+def _install_graceful_shutdown(app, widget, recorder) -> None:
+    """
+    Ctrl+C / SIGTERM / SIGHUP (terminal closed) / SIGBREAK become a normal
+    "stop, save, quit" through the GUI: the file is finalized including
+    MP3 conversion and normalization, the API server is shut down, Qt
+    exits cleanly. A second signal while that is in progress does an
+    emergency save and exits immediately.
+
+    Python signal handlers only run while Python bytecode executes; the
+    widget's 100 ms tick timer guarantees that inside the Qt event loop.
+    """
+    from PyQt6.QtCore import QTimer
+
+    pending = {"count": 0}
+
+    def on_signal(signum: int) -> None:
+        pending["count"] += 1
+        if pending["count"] == 1:
+            log.info("Signal %s received: stopping the recording and quitting.", signum)
+            QTimer.singleShot(0, widget.request_quit)
+        else:
+            log.warning("Second signal: emergency save and immediate exit.")
+            recorder.emergency_save()
+            os._exit(130)
+
+    recorder.set_signal_callback(on_signal)
+    app.aboutToQuit.connect(widget.shutdown)
+
+    # OS logout / shutdown (Windows WM_QUERYENDSESSION, macOS, X11 session
+    # managers): no time for a dialog — finalize the file right away.
+    try:
+        app.commitDataRequest.connect(lambda _manager: recorder.emergency_save())
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -160,8 +222,23 @@ def main() -> None:
         help="Disable token auth for the local API (NOT recommended).",
     )
     args = parser.parse_args()
+    if not 1 <= args.api_port <= 65535:
+        parser.error("--api-port must be between 1 and 65535")
+    if args.preroll < 0:
+        parser.error("--preroll must be >= 0")
 
     setup_logging(verbose=args.verbose, quiet=args.quiet)
+    install_thread_excepthook()
+
+    # Linux/Wayland: Wayland forbids clients from positioning, dragging
+    # or stacking their own windows, which is everything a floating
+    # always-on-top widget does. When XWayland is available prefer the
+    # xcb backend (the widget then behaves exactly as on X11). Users can
+    # still force a backend with QT_QPA_PLATFORM.
+    if (sys.platform == "linux" and not os.environ.get("QT_QPA_PLATFORM")
+            and os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY")):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+        log.info("Wayland session with XWayland: using the xcb backend for the floating widget.")
 
     # PyQt6 aborts the whole process (qFatal) on unhandled Python exceptions
     # raised inside Qt slots. Log them instead: a failed button click must
@@ -170,7 +247,8 @@ def main() -> None:
         log.error("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
     sys.excepthook = _excepthook
 
-    from PyQt6.QtWidgets import QApplication, QMessageBox
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication
 
     # Single instance check (try-bind on the API port). The bound socket is
     # handed to the API server directly — no close/rebind race.
@@ -180,12 +258,18 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Orizon Call")
+    app.setApplicationDisplayName("Orizon Call")
+    app.setOrganizationName("OrizonCall")
+    if sys.platform == 'linux':
+        # Lets Wayland/GNOME/KDE match the window and tray icon to the
+        # orizon-call.desktop entry installed by install.sh.
+        app.setDesktopFileName("orizon-call")
     app.setQuitOnLastWindowClosed(True)
 
-    icon_path = Path(__file__).resolve().parent / "assets" / "icons" / "orizon-call-256.png"
-    if icon_path.exists():
-        from PyQt6.QtGui import QIcon
-        app.setWindowIcon(QIcon(str(icon_path)))
+    from floating_widget import app_icon
+    icon = app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
 
     if sys.platform == 'darwin':
         _hide_dock_icon_macos()
@@ -207,13 +291,10 @@ def main() -> None:
     mic_ok, sys_ok, guidance = recorder.detect_devices()
 
     if not mic_ok:
-        QMessageBox.critical(
-            None,
-            "Orizon Call — Errore",
-            "Nessun microfono trovato.\n\n"
-            "Collega un microfono e riavvia l'applicazione.",
-        )
-        sys.exit(1)
+        # Not fatal: with login autostart a USB/Bluetooth headset is often
+        # enumerated seconds after the app. Devices are re-detected at
+        # every recording start; just tell the user.
+        log.warning("No microphone found at startup — will look again when a recording starts.")
 
     if args.preroll > 0:
         # Start streams continuously so the last N seconds are always buffered.
@@ -233,23 +314,27 @@ def main() -> None:
     if settings["system_audio"] and not sys_ok:
         log.info("System audio not available. Mic only.\n%s", guidance)
 
+    _install_graceful_shutdown(app, widget, recorder)
     widget.show()
+    if not mic_ok:
+        QTimer.singleShot(500, lambda: widget.notify(
+            "Nessun microfono trovato. Collegane uno: verrà cercato di nuovo "
+            "all'avvio della registrazione.", kind="warn", duration_ms=8000))
 
     # Start local API server for web app integration, reusing the
     # already-bound probe socket (single-instance check without TOCTOU).
-    from api_server import start_api_server
+    from api_server import start_api_server, stop_api_server
     api_server = start_api_server(
         widget,
         port=args.api_port,
-        output_dir=Path(settings["output_dir"]) if settings["output_dir"] else None,
+        output_dir=recorder.output_directory,
         cors_origin=args.cors_origin,
         require_auth=not args.no_auth,
         bound_socket=bound_socket,
     )
 
     exit_code = app.exec()
-    if api_server:
-        api_server.shutdown()
+    stop_api_server(api_server)
     sys.exit(exit_code)
 
 

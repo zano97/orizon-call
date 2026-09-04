@@ -25,13 +25,21 @@ if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; t
 fi
 
 VENV=.venv
+STAMP="$VENV/.deps-ok"
 if [ ! -x "$VENV/bin/python" ]; then
     echo "• Primo avvio: creo l'ambiente Python (.venv)…"
-    "$PY" -m venv "$VENV"
+    # --clear: un venv rimasto orfano (Python di sistema aggiornato) viene
+    # ricreato da zero, senza lasciare il vecchio timbro .deps-ok.
+    "$PY" -m venv --clear "$VENV"
+    rm -f "$STAMP"
+fi
+
+# Il timbro vale solo se i pacchetti si importano davvero.
+if [ -f "$STAMP" ] && ! "$VENV/bin/python" -c 'import PyQt6, sounddevice, soundfile, soxr, numpy' >/dev/null 2>&1; then
+    rm -f "$STAMP"
 fi
 
 # Reinstalla le dipendenze solo se requirements.txt è cambiato.
-STAMP="$VENV/.deps-ok"
 if command -v shasum >/dev/null 2>&1; then
     REQ_HASH=$(shasum -a 256 requirements.txt | cut -d' ' -f1)
 else
@@ -39,19 +47,35 @@ else
 fi
 if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$REQ_HASH" ]; then
     echo "• Installo le dipendenze (può richiedere qualche minuto la prima volta)…"
-    "$VENV/bin/pip" install --quiet --upgrade pip
-    "$VENV/bin/pip" install --quiet -r requirements.txt
+    "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade pip
+    "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check -r requirements.txt
     echo "$REQ_HASH" > "$STAMP"
 fi
 
+# ldconfig sta in /sbin, che su Debian non è nel PATH degli utenti normali.
+LDCONFIG="$(command -v ldconfig 2>/dev/null || echo /sbin/ldconfig)"
+
 # Linux: PortAudio è richiesto da sounddevice per la cattura audio.
-if [ "$(uname)" = "Linux" ] && ! ldconfig -p 2>/dev/null | grep -q libportaudio; then
+if [ "$(uname)" = "Linux" ] && ! "$LDCONFIG" -p 2>/dev/null | grep -q libportaudio; then
     echo "⚠ Libreria PortAudio non trovata: la registrazione non funzionerà." >&2
     echo "  Installala con: sudo apt install libportaudio2   (Debian/Ubuntu)" >&2
 fi
+# Linux: il plugin grafico di Qt 6 richiede libxcb-cursor0 (e libEGL).
+if [ "$(uname)" = "Linux" ] && ! "$LDCONFIG" -p 2>/dev/null | grep -q libxcb-cursor.so.0; then
+    echo "⚠ Libreria libxcb-cursor0 non trovata: il widget potrebbe non avviarsi." >&2
+    echo "  Installala con: sudo apt install libxcb-cursor0 libegl1 libxkbcommon-x11-0   (Debian/Ubuntu)" >&2
+fi
 
-# Helper audio di sistema (macOS): compila solo se manca.
-if [ "$(uname)" = "Darwin" ] && [ ! -x helpers/system_audio_capture ]; then
+# Helper audio di sistema (macOS): compila se manca o se il binario nel repo
+# (Apple Silicon) non è per questa architettura (Mac Intel).
+_helper_ok() {
+    [ -x helpers/system_audio_capture ] || return 1
+    if command -v lipo >/dev/null 2>&1; then
+        lipo -archs helpers/system_audio_capture 2>/dev/null | grep -qw "$(uname -m)" || return 1
+    fi
+    return 0
+}
+if [ "$(uname)" = "Darwin" ] && ! _helper_ok; then
     if command -v swiftc >/dev/null 2>&1; then
         echo "• Compilo l'helper per l'audio di sistema…"
         (cd helpers && ./build.sh)

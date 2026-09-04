@@ -7,44 +7,74 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install ruff
+      - run: ruff check .
+
   test:
-    name: pytest (${{ matrix.os }})
+    name: pytest (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        # 3.13 is what the installers pick first on a fresh machine.
+        python: ['3.12', '3.13']
+        include:
+          # Oldest supported interpreter (README: Python 3.10+).
+          - os: ubuntu-latest
+            python: '3.10'
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
           cache: pip
 
       # PortAudio: on Windows/macOS the sounddevice wheel bundles it,
-      # on Linux it must come from the system.
+      # on Linux it must come from the system. libxcb-cursor0 is what the
+      # Qt xcb plugin needs (offscreen tests still load QtGui).
       - name: Install system libraries (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q libportaudio2 libegl1
+          sudo apt-get install -y -q libportaudio2 libegl1 libxcb-cursor0 libxkbcommon-x11-0
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      - name: Check dependency resolution and imports
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          pip check
+          python -c "import PyQt6.QtWidgets, sounddevice, soundfile, soxr, numpy, imageio_ffmpeg"
+
       - name: Run tests
-        run: pytest tests/ -v
+        run: pytest tests/ -v --timeout=180
 
   installer-syntax:
     name: installer scripts parse
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: bash -n install.sh / start.sh
         run: |
           bash -n install.sh
           bash -n start.sh
+      - name: shellcheck
+        run: shellcheck -S warning install.sh start.sh helpers/build.sh "Avvia Orizon Call.command"
       - name: PowerShell parse install.ps1
         shell: pwsh
         run: |

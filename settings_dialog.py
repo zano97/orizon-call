@@ -9,9 +9,6 @@ applied to the recorder immediately on save (they take effect from the
 next recording).
 """
 
-from pathlib import Path
-
-from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -135,7 +132,7 @@ class SettingsDialog(QDialog):
         self._dir_edit = QLineEdit(self)
         self._dir_edit.setReadOnly(True)
         self._dir_edit.setText(s["output_dir"])
-        self._dir_edit.setPlaceholderText(str(Path.home() / "Downloads") + "  (predefinita)")
+        self._dir_edit.setPlaceholderText(str(app_settings.default_downloads_dir()) + "  (predefinita)")
         browse = QPushButton("Sfoglia…", self)
         browse.clicked.connect(self._pick_dir)
         reset = QPushButton("Predefinita", self)
@@ -207,7 +204,7 @@ class SettingsDialog(QDialog):
                 return
 
     def _pick_dir(self) -> None:
-        start = self._dir_edit.text() or str(Path.home() / "Downloads")
+        start = self._dir_edit.text() or str(app_settings.default_downloads_dir())
         chosen = QFileDialog.getExistingDirectory(
             self, "Scegli la cartella delle registrazioni", start)
         if chosen:
@@ -233,12 +230,20 @@ class SettingsDialog(QDialog):
         return values
 
 
-def open_settings(parent, recorder) -> bool:
-    """Show the dialog; on save, persist and apply to the recorder.
-    Returns True if the user saved."""
+def open_settings(parent, recorder, apply: bool = True, before_exec=None):
+    """Show the dialog; on save, persist (and, with ``apply``, push the
+    values into the recorder). ``before_exec(dialog)`` runs just before the
+    modal loop (platform tweaks such as the macOS floating level).
+    Returns the saved values dict, or None if the user cancelled."""
     dialog = SettingsDialog(parent)
+    if before_exec is not None:
+        try:
+            before_exec(dialog)
+        except Exception:
+            pass
     if dialog.exec() == QDialog.DialogCode.Accepted:
         values = dialog.save()
-        app_settings.apply_to_recorder(recorder, values)
-        return True
-    return False
+        if apply:
+            app_settings.apply_to_recorder(recorder, values)
+        return values
+    return None

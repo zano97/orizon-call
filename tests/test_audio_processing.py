@@ -1,7 +1,6 @@
 """Tests for auto-balance gain matching and loudness normalization fallback."""
 
 import shutil
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -40,7 +39,7 @@ class TestAutoBalance:
         mic = np.full(1024, 0.02, dtype=np.float32)
         sys_ = np.full((1024, 2), 0.5, dtype=np.float32)
         for _ in range(200):
-            out = recorder._mix_frames(mic.copy(), sys_.copy())
+            recorder._mix_frames(mic.copy(), sys_.copy())
         # After convergence, the quiet mic should have been amplified close
         # to the target RMS (~0.12), the loud sys gently turned down.
         # Mic running gain should be > 1 (amplification).

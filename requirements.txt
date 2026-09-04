@@ -1,11 +1,13 @@
-PyQt6>=6.5
-sounddevice>=0.4.6
-soundfile>=0.12
-numpy>=1.24
-soxr>=0.3                                       # high-quality resampling
-imageio-ffmpeg>=0.4.9                           # bundled static ffmpeg: MP3 + loudnorm with no system install
-PyAudioWPatch>=0.2.12; sys_platform == "win32"
-pulsectl>=23.5; sys_platform == "linux"
-pyobjc-framework-Cocoa>=9.0; sys_platform == "darwin"
+PyQt6>=6.5,<7
+sounddevice>=0.4.6,<1
+soundfile>=0.12,<1
+numpy>=1.24,<3
+soxr>=0.3,<2                                    # high-quality resampling
+imageio-ffmpeg>=0.4.9,<1                        # bundled static ffmpeg: MP3 + loudnorm with no system install
+PyAudioWPatch>=0.2.12,<1; sys_platform == "win32"
+pulsectl>=23.5,<30; sys_platform == "linux"
+pyobjc-framework-Cocoa>=9.0,<13; sys_platform == "darwin"
 
+# Upper bounds stop a one-command install from picking up a future major
+# release that changes APIs before it has been tested here.
 # Dev/test: pip install -r requirements-dev.txt

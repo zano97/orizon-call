@@ -24,6 +24,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = 'Stop'
+# PowerShell 7.4+: senza questa riga un comando nativo (git, winget) che esce
+# con codice != 0 solleva un errore terminante prima che $LASTEXITCODE venga
+# letto, e il fallback interattivo (token) non parte mai. Ignorata su 5.1.
+$PSNativeCommandUseErrorActionPreference = $false
 
 $Repo = if ($env:ORIZON_CALL_REPO) { $env:ORIZON_CALL_REPO } else { 'zano97/orizon-call' }
 $Ref  = if ($env:ORIZON_CALL_REF)  { $env:ORIZON_CALL_REF }  else { 'master' }
@@ -36,6 +40,30 @@ $Bin  = Join-Path $Base 'bin'
 function Say($msg)  { Write-Host "* $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "! $msg" -ForegroundColor Yellow }
 
+# ── PATH utente (registro, senza espandere le variabili altrui) ──────────────
+# GetEnvironmentVariable restituisce il PATH *espanso*: riscriverlo perderebbe
+# per sempre le voci %USERPROFILE%\... di altri programmi e cambierebbe il tipo
+# della chiave. Si lavora quindi sul valore grezzo e si conserva ExpandString.
+function Update-UserPath {
+    param([string]$Add, [string]$Remove)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    try {
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $parts = @($raw -split ';' | Where-Object { $_ })
+        $changed = $false
+        if ($Remove -and ($parts -contains $Remove)) {
+            $parts = @($parts | Where-Object { $_ -ne $Remove }); $changed = $true
+        }
+        if ($Add -and -not ($parts -contains $Add)) {
+            $parts += $Add; $changed = $true
+        }
+        if ($changed) {
+            $key.SetValue('Path', ($parts -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        }
+        return $changed
+    } finally { $key.Close() }
+}
+
 # ── Disinstallazione ─────────────────────────────────────────────────────────
 if ($env:ORIZON_CALL_UNINSTALL -eq '1') {
     Say 'Rimuovo Orizon Call...'
@@ -43,11 +71,7 @@ if ($env:ORIZON_CALL_UNINSTALL -eq '1') {
     $startMenu = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\Orizon Call.lnk'
     $desktop   = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Orizon Call.lnk'
     Remove-Item -Force -ErrorAction SilentlyContinue $startMenu, $desktop
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($userPath -like "*$Bin*") {
-        $newPath = ($userPath -split ';' | Where-Object { $_ -and $_ -ne $Bin }) -join ';'
-        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-    }
+    Update-UserPath -Remove $Bin
     Say 'Fatto. Le registrazioni (Downloads) e i token/log (~\.orizon-call) NON sono stati toccati.'
     Remove-Item Env:\ORIZON_CALL_UNINSTALL -ErrorAction SilentlyContinue
     return
@@ -177,26 +201,31 @@ Say 'Installo le dipendenze (la prima volta puo'' richiedere qualche minuto)...'
 # ── 4. Comando `orizon-call` + collegamenti ─────────────────────────────────
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 
-# Avvio normale: pythonw = nessuna finestra console.
+# Avvio normale: pythonw = nessuna finestra console. I percorsi NON sono
+# incorporati nel file: cmd.exe espande %LOCALAPPDATA% correttamente in
+# qualunque code page, mentre un nome utente con accenti (C:\Users\Nicolò)
+# scritto in ASCII diventerebbe illeggibile.
 @"
 @echo off
+setlocal
+set "OC=%LOCALAPPDATA%\OrizonCall"
 rem update/uninstall usano la copia locale dello script: funziona anche
 rem se il repository e' privato.
-if "%1"=="update"    powershell -NoProfile -ExecutionPolicy Bypass -Command "`$env:ORIZON_CALL_REF='$Ref'; & '$App\install.ps1'" & goto :eof
-if "%1"=="uninstall" powershell -NoProfile -ExecutionPolicy Bypass -Command "`$env:ORIZON_CALL_UNINSTALL='1'; & '$App\install.ps1'" & goto :eof
-start "" "$VenvPythonW" "$App\main.py" %*
+if "%~1"=="update"    powershell -NoProfile -ExecutionPolicy Bypass -Command "`$env:ORIZON_CALL_REF='$Ref'; & '%OC%\app\install.ps1'" & goto :eof
+if "%~1"=="uninstall" powershell -NoProfile -ExecutionPolicy Bypass -Command "`$env:ORIZON_CALL_UNINSTALL='1'; & '%OC%\app\install.ps1'" & goto :eof
+start "" "%OC%\venv\Scripts\pythonw.exe" "%OC%\app\main.py" %*
 "@ | Set-Content -Encoding ASCII (Join-Path $Bin 'orizon-call.cmd')
 
 # Variante con console visibile, utile per vedere i log dal vivo.
 @"
 @echo off
-"$VenvPython" "$App\main.py" %*
+setlocal
+set "OC=%LOCALAPPDATA%\OrizonCall"
+"%OC%\venv\Scripts\python.exe" "%OC%\app\main.py" %*
 "@ | Set-Content -Encoding ASCII (Join-Path $Bin 'orizon-call-debug.cmd')
 
 # PATH utente
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -notlike "*$Bin*") {
-    [Environment]::SetEnvironmentVariable('Path', "$userPath;$Bin", 'User')
+if (Update-UserPath -Add $Bin) {
     Say 'Aggiunto al PATH utente (apri un nuovo terminale per usare `orizon-call`).'
 }
 

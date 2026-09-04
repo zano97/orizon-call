@@ -72,7 +72,8 @@ def test_dialog_save_persists_and_applies(qapp, isolated_settings):
     orig = sd.SettingsDialog
     sd.SettingsDialog = AutoAcceptDialog
     try:
-        assert open_settings(None, recorder) is True
+        values = open_settings(None, recorder)
+        assert values and values["output_format"] == "flac"
     finally:
         sd.SettingsDialog = orig
     assert recorder._output_format == "flac"

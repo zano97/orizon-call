@@ -12,6 +12,7 @@ this configuration. Calling setup_logging() more than once is a no-op.
 import logging
 import logging.handlers
 import sys
+import threading
 from pathlib import Path
 
 
@@ -37,13 +38,16 @@ def setup_logging(verbose: bool = False, quiet: bool = False) -> logging.Logger:
     root.propagate = False
 
     console_level = logging.WARNING if quiet else (logging.DEBUG if verbose else logging.INFO)
-    console = logging.StreamHandler(stream=sys.stderr)
-    console.setLevel(console_level)
-    console.setFormatter(logging.Formatter(
-        fmt="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    ))
-    root.addHandler(console)
+    # Under pythonw.exe (Windows launcher/shortcut) there is no console and
+    # sys.stderr is None: a StreamHandler on it would raise on every record.
+    if sys.stderr is not None:
+        console = logging.StreamHandler(stream=sys.stderr)
+        console.setLevel(console_level)
+        console.setFormatter(logging.Formatter(
+            fmt="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        root.addHandler(console)
 
     try:
         log_path = _log_dir() / "orizon.log"
@@ -64,6 +68,24 @@ def setup_logging(verbose: bool = False, quiet: bool = False) -> logging.Logger:
 
     _CONFIGURED = True
     return root
+
+
+def install_thread_excepthook() -> None:
+    """Route uncaught exceptions from worker threads (writer, watchdog,
+    API handlers, start/stop workers) into the log instead of a bare
+    traceback on a stderr that may not even exist under pythonw."""
+    logger = logging.getLogger(f"{_ROOT_NAME}.threads")
+
+    def _hook(args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is SystemExit:
+            return
+        thread_name = args.thread.name if args.thread is not None else "?"
+        logger.error(
+            "Unhandled exception in thread %s", thread_name,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = _hook
 
 
 def get_logger(name: str) -> logging.Logger:
