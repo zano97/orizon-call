@@ -34,10 +34,16 @@ def test_dialog_reflects_saved_settings(qapp, isolated_settings, tmp_path):
         "dual_track": True,
         "auto_balance": False,
         "system_audio": False,
+        "hide_from_screen_share": False,
+        "call_detection": "auto",
+        "call_detection_ignored": ["Zoom"],
     })
     from settings_dialog import SettingsDialog
     dlg = SettingsDialog()
     values = dlg.values()
+    assert values["hide_from_screen_share"] is False
+    assert values["call_detection"] == "auto"
+    assert values["call_detection_ignored"] == ["Zoom"]
     assert values["output_format"] == "mp3"
     assert values["output_dir"] == str(tmp_path)
     assert values["normalize"] is True
@@ -85,3 +91,21 @@ def test_lufs_combo_follows_normalize_checkbox(qapp, isolated_settings):
     assert dlg._lufs.isEnabled() is False
     dlg._normalize.setChecked(True)
     assert dlg._lufs.isEnabled() is True
+
+
+def test_reset_ignored_apps(qapp, isolated_settings):
+    app_settings.save_settings({"call_detection_ignored": ["Zoom", "Slack"]})
+    from settings_dialog import SettingsDialog
+    dlg = SettingsDialog()
+    assert "Zoom" in dlg._reset_ignored.text()
+    dlg._reset_ignored.click()
+    dlg.save()
+    assert app_settings.load_settings()["call_detection_ignored"] == []
+
+
+def test_defaults_privacy_on_and_propose(qapp, isolated_settings):
+    from settings_dialog import SettingsDialog
+    values = SettingsDialog().values()
+    assert values["hide_from_screen_share"] is True
+    assert values["call_detection"] == "propose"
+    assert values["call_detection_ignored"] == []

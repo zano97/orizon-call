@@ -3,7 +3,8 @@ Settings dialog for Orizon Call.
 
 Opened from the widget's right-click menu while idle. Lets the user pick
 the output format (WAV / FLAC / MP3), the destination folder, loudness
-normalization, dual-track layout, auto-balance and system-audio capture —
+normalization, dual-track layout, auto-balance, system-audio capture,
+hiding the widget from screen sharing and automatic call detection —
 without touching the terminal. Values persist via app_settings and are
 applied to the recorder immediately on save (they take effect from the
 next recording).
@@ -23,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 import app_settings
+import screen_privacy
 
 # Orizon design tokens (kept in sync with floating_widget.py)
 _BG = "#0f172a"        # gray.900
@@ -45,6 +47,11 @@ QLabel[hint="true"] {{
     color: {_TEXT_DIM};
     font-size: 11px;
 }}
+QLabel[section="true"] {{
+    color: {_BRAND};
+    font-weight: 600;
+    padding-top: 6px;
+}}
 QCheckBox {{
     color: {_TEXT};
     background: transparent;
@@ -59,6 +66,11 @@ QCheckBox::indicator {{
 QCheckBox::indicator:checked {{
     background: {_BRAND};
     border-color: {_BRAND_DARK};
+}}
+QCheckBox:disabled {{ color: {_TEXT_DIM}; }}
+QCheckBox::indicator:disabled {{
+    background: {_FIELD};
+    border-color: {_BORDER};
 }}
 QComboBox, QLineEdit {{
     color: {_TEXT};
@@ -96,6 +108,12 @@ _FORMATS = [
     ("wav", "WAV — qualità piena (predefinito)"),
     ("flac", "FLAC — compresso senza perdite"),
     ("mp3", "MP3 — file leggero, ideale da condividere"),
+]
+
+_CALL_MODES = [
+    ("propose", "Proponi di registrarla (predefinito)"),
+    ("auto", "Avvia subito la registrazione"),
+    ("off", "Non fare nulla"),
 ]
 
 _LUFS = [
@@ -181,6 +199,46 @@ class SettingsDialog(QDialog):
         hint.setProperty("hint", True)
         layout.addWidget(hint)
 
+        # Privacy e call
+        section = QLabel("Privacy e call", self)
+        section.setProperty("section", True)
+        layout.addWidget(section)
+
+        self._hide_share = QCheckBox(
+            "Nascondi il widget a chi vede il mio schermo (condivisione e registrazioni schermo)", self)
+        self._hide_share.setChecked(s["hide_from_screen_share"])
+        layout.addWidget(self._hide_share)
+        if not screen_privacy.is_supported():
+            self._hide_share.setEnabled(False)
+            share_hint = QLabel(screen_privacy.unsupported_reason(), self)
+            share_hint.setProperty("hint", True)
+            share_hint.setWordWrap(True)
+            layout.addWidget(share_hint)
+
+        call_form = QFormLayout()
+        call_form.setSpacing(10)
+        self._call_mode = QComboBox(self)
+        for value, label in _CALL_MODES:
+            self._call_mode.addItem(label, value)
+        self._select_data(self._call_mode, s["call_detection"])
+        call_form.addRow("Quando inizia una call:", self._call_mode)
+        layout.addLayout(call_form)
+
+        self._ignored = list(s["call_detection_ignored"])
+        self._reset_ignored = QPushButton(self)
+        self._reset_ignored.clicked.connect(self._clear_ignored)
+        self._refresh_ignored_button()
+        ignored_row = QHBoxLayout()
+        ignored_row.addWidget(self._reset_ignored)
+        ignored_row.addStretch()
+        layout.addLayout(ignored_row)
+
+        call_hint = QLabel("La call viene riconosciuta quando un'altra app (Meet, Zoom, Teams…) "
+                           "usa il microfono per qualche secondo.", self)
+        call_hint.setProperty("hint", True)
+        call_hint.setWordWrap(True)
+        layout.addWidget(call_hint)
+
         # Pulsanti
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -203,6 +261,18 @@ class SettingsDialog(QDialog):
                 combo.setCurrentIndex(i)
                 return
 
+    def _refresh_ignored_button(self) -> None:
+        if self._ignored:
+            self._reset_ignored.setText(
+                f"Ripristina app ignorate ({', '.join(self._ignored)})")
+            self._reset_ignored.setVisible(True)
+        else:
+            self._reset_ignored.setVisible(False)
+
+    def _clear_ignored(self) -> None:
+        self._ignored = []
+        self._refresh_ignored_button()
+
     def _pick_dir(self) -> None:
         start = self._dir_edit.text() or str(app_settings.default_downloads_dir())
         chosen = QFileDialog.getExistingDirectory(
@@ -221,6 +291,9 @@ class SettingsDialog(QDialog):
             "normalize": self._normalize.isChecked(),
             "normalize_lufs": self._lufs.currentData(),
             "system_audio": self._system_audio.isChecked(),
+            "hide_from_screen_share": self._hide_share.isChecked(),
+            "call_detection": self._call_mode.currentData(),
+            "call_detection_ignored": list(self._ignored),
         }
 
     def save(self) -> dict:

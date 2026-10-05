@@ -151,6 +151,47 @@ l'audio, senza toccare il terminale. Le scelte restano memorizzate.
   (sinistra = microfono, destra = sistema: comoda per la trascrizione).
   Le modifiche valgono subito dalla registrazione successiva, senza riavvio.
 
+### Invisibile a chi vede il tuo schermo
+
+Quando condividi lo schermo in Meet, Zoom o Teams (o fai una registrazione
+dello schermo) il widget **resta visibile a te ma non compare agli altri**:
+lo stesso vale per notifiche, menu e finestre dell'app. È attivo di
+default; si disattiva da **Impostazioni → Privacy e call** (o per una
+sessione con `--show-in-screen-share`).
+
+| Sistema | Come funziona |
+|---|---|
+| Windows 10 (2004+) / 11 | La finestra viene esclusa dalla cattura (`WDA_EXCLUDEFROMCAPTURE`). Su Windows più vecchi appare come un rettangolo nero: il contenuto resta comunque nascosto |
+| macOS | Finestra marcata come non condivisibile (`NSWindowSharingNone`). Su macOS 15+ alcune app che catturano tramite ScreenCaptureKit possono ignorarlo: è una scelta di Apple, senza API pubbliche per evitarlo |
+| Linux | Non supportato: né X11 né Wayland permettono a un'app di nascondersi dalla cattura |
+
+### Rilevamento automatico delle call
+
+Quando un'altra app inizia a usare il microfono per qualche secondo (Meet
+nel browser, Zoom, Teams, Slack, Discord, FaceTime, WhatsApp…), Orizon Call
+capisce che è partita una call e sopra il widget compare una proposta:
+
+- **Registra** → avvia la registrazione;
+- **Non ora** → per questa call non chiede più;
+- **Mai per quest'app** → non propone più le call di quell'app (si
+  ripristina dalle Impostazioni).
+
+Quando l'app rilascia il microfono (la call è finita) e stai registrando
+quella call, Orizon Call propone **Stop e salva**. Anche la proposta è
+invisibile a chi vede il tuo schermo.
+
+Da **Impostazioni → Privacy e call → Quando inizia una call** scegli:
+*Proponi di registrarla* (predefinito), *Avvia subito la registrazione*
+(e la ferma da sola a fine call, se l'aveva avviata lei) oppure *Non fare
+nulla*. Per una singola sessione: `--call-detection off|propose|auto`.
+
+Il rilevamento non legge audio né contenuti: guarda solo **quale app tiene
+aperto il microfono** — su Windows tramite il registro privacy del sistema
+(lo stesso dell'icona del microfono nella barra), su macOS 14.2+ tramite
+CoreAudio per processo (su macOS precedenti a livello di dispositivo, e
+quindi solo mentre Orizon Call non sta registrando), su Linux tramite gli
+stream di registrazione di PulseAudio/PipeWire.
+
 Tastiera (con il widget attivo, ad es. dopo «Mostra il widget» dalla tray):
 **Spazio/Invio** avvia o ferma, **P** pausa, **M** mute.
 
@@ -174,6 +215,8 @@ orizon-call --normalize        # normalizza il volume a -16 LUFS dopo lo stop
 orizon-call --preroll 5        # buffer di pre-roll: non perdi l'inizio call
 orizon-call --no-system-audio  # solo microfono
 orizon-call --output-dir DIR   # cartella di destinazione
+orizon-call --call-detection auto   # rilevamento call: off | propose | auto
+orizon-call --show-in-screen-share  # il widget compare nella condivisione schermo
 orizon-call --help             # tutte le opzioni
 ```
 
@@ -182,6 +225,11 @@ orizon-call --help             # tutte le opzioni
 - **Widget flottante** sopra tutte le finestre: cerchio quando inattivo,
   pillola con timer, VU meter, mute, pausa e stop durante la registrazione.
   Salvataggio asincrono: la UI non si blocca mai.
+- **Invisibile nella condivisione schermo** (Windows e macOS): il widget lo
+  vedi solo tu, non chi guarda il tuo schermo condiviso.
+- **Rilevamento automatico delle call**: quando un'altra app usa il
+  microfono propone di registrare (o registra da sola) e a fine call
+  propone di salvare.
 - **Audio di sistema senza driver**: macOS 13+ (helper ScreenCaptureKit),
   Windows (WASAPI loopback), Linux (monitor PulseAudio/PipeWire).
 - **Mix allineato al campione**: le due sorgenti sono scritte solo nella
@@ -227,8 +275,8 @@ cd orizon-call
 
 In alternativa manuale: `pip install -r requirements.txt && python3 main.py`.
 
-**Test** (210+ casi: allineamento writer, deriva/starvation, split, state
-machine, watchdog, API, sicurezza, normalizzazione, rilevamento dispositivi)
+**Test** (260+ casi: allineamento writer, deriva/starvation, split, state
+machine, watchdog, API, sicurezza, normalizzazione, rilevamento dispositivi, rilevamento call, privacy condivisione schermo)
 e lint:
 
 ```bash
@@ -259,4 +307,6 @@ Line Tools: `cd helpers && ./build.sh`. Diagnostica cattura:
 | Linux: il widget non resta in primo piano su Wayland | Con XWayland disponibile l'app usa il backend xcb (spostabile, sempre in primo piano); su Wayland puro si ri-alza da solo ogni pochi secondi. Forza un backend con `QT_QPA_PLATFORM=wayland|xcb` |
 | L'export MP3 non parte | Non dovrebbe più succedere (ffmpeg è incluso); in ogni caso il WAV originale non viene mai perso — controlla i log |
 | «Un'altra istanza è già in esecuzione» | C'è già un Orizon Call attivo (controlla il widget); oppure usa `--api-port` per cambiare porta |
+| Il widget si vede ancora nella condivisione schermo | Verifica **Impostazioni → Privacy e call**. Su Linux non è possibile nasconderlo; su macOS 15+ alcune app che usano ScreenCaptureKit lo mostrano comunque |
+| La proposta di registrare compare senza una call | Un'app tiene aperto il microfono (es. un effetto voce sempre attivo): scegli **Mai per quest'app**, oppure imposta il rilevamento su *Non fare nulla* |
 | Log dettagliati | `orizon-call --verbose`, file di log in `~/.orizon-call/logs/` |

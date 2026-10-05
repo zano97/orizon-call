@@ -585,6 +585,12 @@ class AudioRecorder:
     def is_mic_muted(self) -> bool:
         return self._mic_muted
 
+    @property
+    def is_preroll_active(self) -> bool:
+        """Streams kept open while idle (pre-roll): the mic is in use by
+        this process even when nothing is being recorded."""
+        return self._preroll_active
+
     def set_auto_balance(self, enabled: bool) -> None:
         """Enable/disable per-source RMS gain matching before mixing."""
         self._auto_balance = bool(enabled)
