@@ -40,8 +40,11 @@ log = get_logger("calls")
 
 MODES = ("off", "propose", "auto")
 
-POLL_INTERVAL_S = 1.5
-START_DELAY_S = 3.0     # mic held this long by another app = a call
+# Probes are cheap (a registry read, a few CoreAudio property reads, one
+# PulseAudio round trip): poll often so the prompt shows up about 2 s
+# after the call app grabs the microphone.
+POLL_INTERVAL_S = 0.5
+START_DELAY_S = 1.5     # mic held this long by another app = a call
 END_DELAY_S = 12.0      # mic released this long = the call ended
 
 
@@ -369,7 +372,9 @@ class _PulseProbe:
         import pulsectl
         try:
             if self._pulse is None:
-                self._pulse = pulsectl.Pulse("orizon-call-calls")
+                # No autospawn: polling must never start a sound server.
+                self._pulse = pulsectl.Pulse("orizon-call-calls", connect=False)
+                self._pulse.connect(autospawn=False)
             sources = {s.index: s for s in self._pulse.source_list()}
             outputs = self._pulse.source_output_list()
         except Exception:
@@ -412,7 +417,7 @@ class CallEvent:
 class CallDetector:
     """Pure state machine (no Qt, no clock): feed it probes with a
     timestamp, get "started"/"ended" events. A brief mic grab (a
-    notification sound check, a voice memo of two seconds) is not a call;
+    notification sound check, a sub-second test of the device) is not a call;
     a few seconds of silence mid-call (an app reopening the device) is
     not the end of one."""
 
@@ -489,7 +494,11 @@ class _ProbeThread(threading.Thread):
                     log.warning("Call detection probe failed", exc_info=True)
             if not self._stop_event.is_set():
                 self._deliver(usage)
-            self._stop_event.wait(self._interval)
+            # A probe that keeps failing (no sound server, API missing)
+            # backs off up to 30 s instead of retrying twice a second.
+            delay = self._interval if not self._failures else min(
+                30.0, self._interval * (2 ** min(self._failures, 6)))
+            self._stop_event.wait(delay)
         close = getattr(self._probe, "close", None)
         if close is not None:
             close()
@@ -506,7 +515,7 @@ class CallAssistant(QObject):
     stops by itself the recordings it started).
 
     The widget is duck-typed (``recorder_state_name``, ``is_busy``,
-    ``is_capturing_mic``, ``show_call_prompt``, ``start_recording_for_call``,
+    ``is_capturing_mic``, ``show_prompt``, ``start_recording_for_call``,
     ``stop_recording_for_call``, ``notify``, ``recording_started``,
     ``recording_stopped``) so the logic is testable without audio.
     """
@@ -620,7 +629,7 @@ class CallAssistant(QObject):
             self._widget.start_recording_for_call(app, automatic=True)
             return
         self._close_prompt()
-        self._prompt = self._widget.show_call_prompt(
+        self._prompt = self._widget.show_prompt(
             f"Sembra che sia iniziata una call su {app}.\nVuoi registrarla?",
             [("Registra", lambda: self._accept(app), True),
              ("Non ora", self._dismiss, False),
@@ -636,7 +645,7 @@ class CallAssistant(QObject):
         if self._mode == "auto" and self._auto_started:
             self._widget.stop_recording_for_call(app, automatic=True)
             return
-        self._prompt = self._widget.show_call_prompt(
+        self._prompt = self._widget.show_prompt(
             f"La call su {app} sembra terminata.\nFermare e salvare la registrazione?",
             [("Stop e salva", lambda: self._widget.stop_recording_for_call(app, automatic=False), True),
              ("Continua", self._clear_prompt, False)],

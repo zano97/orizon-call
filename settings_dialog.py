@@ -4,7 +4,8 @@ Settings dialog for Orizon Call.
 Opened from the widget's right-click menu while idle. Lets the user pick
 the output format (WAV / FLAC / MP3), the destination folder, loudness
 normalization, dual-track layout, auto-balance, system-audio capture,
-hiding the widget from screen sharing and automatic call detection —
+hiding the widget from screen sharing, automatic call detection and
+in-app update checks —
 without touching the terminal. Values persist via app_settings and are
 applied to the recorder immediately on save (they take effect from the
 next recording).
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
 
 import app_settings
 import screen_privacy
+import updater
 
 # Orizon design tokens (kept in sync with floating_widget.py)
 _BG = "#0f172a"        # gray.900
@@ -234,10 +236,25 @@ class SettingsDialog(QDialog):
         layout.addLayout(ignored_row)
 
         call_hint = QLabel("La call viene riconosciuta quando un'altra app (Meet, Zoom, Teams…) "
-                           "usa il microfono per qualche secondo.", self)
+                           "usa il microfono: la proposta compare in circa 2 secondi.", self)
         call_hint.setProperty("hint", True)
         call_hint.setWordWrap(True)
         layout.addWidget(call_hint)
+
+        # Aggiornamenti
+        updates = QLabel("Aggiornamenti", self)
+        updates.setProperty("section", True)
+        layout.addWidget(updates)
+        self._auto_update = QCheckBox(
+            "Controlla gli aggiornamenti e proponi di installarli", self)
+        self._auto_update.setChecked(s["auto_update_check"])
+        layout.addWidget(self._auto_update)
+        if not updater.is_managed_install():
+            update_hint = QLabel("Questa copia non è stata installata con l'installer "
+                                 "(cartella di sviluppo): si aggiorna con 'git pull'.", self)
+            update_hint.setProperty("hint", True)
+            update_hint.setWordWrap(True)
+            layout.addWidget(update_hint)
 
         # Pulsanti
         buttons = QHBoxLayout()
@@ -294,6 +311,7 @@ class SettingsDialog(QDialog):
             "hide_from_screen_share": self._hide_share.isChecked(),
             "call_detection": self._call_mode.currentData(),
             "call_detection_ignored": list(self._ignored),
+            "auto_update_check": self._auto_update.isChecked(),
         }
 
     def save(self) -> dict:

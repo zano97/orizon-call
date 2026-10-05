@@ -252,7 +252,15 @@ _fetch_tarball() {
     fi
     rm -rf "$APP_DIR.new"
     mkdir -p "$APP_DIR.new"
+    # L'archivio non ha .git: la cartella "owner-repo-<sha>/" dice quale
+    # commit è installato (serve al controllo aggiornamenti dell'app).
+    local top
+    top="$(tar -tzf "$tgz" 2>/dev/null | head -n 1 || true)"
     tar -xzf "$tgz" -C "$APP_DIR.new" --strip-components=1
+    top="${top%%/*}"
+    if [ -n "$top" ]; then
+        printf '%s\n' "${top##*-}" > "$APP_DIR.new/.installed_commit"
+    fi
     rm -f "$tgz"
     rm -rf "$APP_DIR"
     mv "$APP_DIR.new" "$APP_DIR"
