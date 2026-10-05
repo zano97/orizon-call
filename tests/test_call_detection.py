@@ -152,7 +152,7 @@ class FakeWidget(QObject):
     def is_capturing_mic(self):
         return self.capturing or self.state != "idle"
 
-    def show_call_prompt(self, text, actions, on_timeout=None):
+    def show_prompt(self, text, actions, on_timeout=None):
         prompt = SimpleNamespace(text=text, actions=actions, on_timeout=on_timeout,
                                  closed=False)
         prompt.close_silently = lambda: setattr(prompt, "closed", True)

@@ -184,8 +184,12 @@ function Fetch-Repo {
         $tmp = Join-Path $env:TEMP 'orizon-call-unzip'
         if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
         Expand-Archive $zip -DestinationPath $tmp
+        $top = Get-ChildItem $tmp | Select-Object -First 1
         if (Test-Path $App) { Remove-Item -Recurse -Force $App }
-        Move-Item (Get-ChildItem $tmp | Select-Object -First 1).FullName $App
+        Move-Item $top.FullName $App
+        # Lo zip non ha .git: la cartella "owner-repo-<sha>" dice quale
+        # commit e' installato (serve al controllo aggiornamenti dell'app).
+        Set-Content -Path (Join-Path $App '.installed_commit') -Value (($top.Name -split '-')[-1])
         Remove-Item -Force $zip
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
         return $true
@@ -195,7 +199,11 @@ function Fetch-Repo {
 if (-not (Fetch-Repo)) {
     Warn 'Download fallito: se il repository e'' privato servono credenziali GitHub.'
     Warn 'Via piu'' comoda: installa GitHub CLI (winget install GitHub.cli), esegui ''gh auth login'' e rilancia.'
-    $manual = Read-Host 'In alternativa incolla ora un token GitHub in sola lettura (Invio per annullare)'
+    # Aggiornamento dall'app (finestra nascosta): nessuno puo' rispondere.
+    $manual = $null
+    if (-not $env:ORIZON_CALL_NONINTERACTIVE) {
+        $manual = Read-Host 'In alternativa incolla ora un token GitHub in sola lettura (Invio per annullare)'
+    }
     if ($manual) {
         $script:Token = $manual.Trim()
         if (-not (Fetch-Repo)) { throw 'Impossibile scaricare il repository (token non valido o senza accesso).' }
@@ -214,6 +222,7 @@ if (-not (Test-Path $VenvPython)) {
 Say 'Installo le dipendenze (la prima volta puo'' richiedere qualche minuto)...'
 & $VenvPython -m pip install --quiet --upgrade pip
 & $VenvPython -m pip install --quiet -r (Join-Path $App 'requirements.txt')
+if ($LASTEXITCODE -ne 0) { throw 'Installazione delle dipendenze non riuscita (pip).' }
 
 # ── 4. Comando `orizon-call` + collegamenti ─────────────────────────────────
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null

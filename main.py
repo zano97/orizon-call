@@ -229,6 +229,11 @@ def main() -> None:
              "or do nothing.",
     )
     parser.add_argument(
+        "--no-update-check",
+        action="store_true",
+        help="Do not look for updates on GitHub during this session.",
+    )
+    parser.add_argument(
         "--show-in-screen-share",
         action="store_true",
         help="Let the widget appear when the screen is shared or recorded "
@@ -342,8 +347,15 @@ def main() -> None:
             {"call_detection_ignored": apps}),
     ))
 
+    # In-app updates: check GitHub now and then, propose "update now"
+    # (quit → installer → restart), never during a recording.
+    from updater import UpdateManager
+    update_manager = UpdateManager(widget, enabled=settings["auto_update_check"])
+    widget.set_update_manager(update_manager)
+
     _install_graceful_shutdown(app, widget, recorder)
     widget.show()
+    QTimer.singleShot(1500, update_manager.report_last_update)
     if not mic_ok:
         QTimer.singleShot(500, lambda: widget.notify(
             "Nessun microfono trovato. Collegane uno: verrà cercato di nuovo "

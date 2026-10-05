@@ -663,6 +663,7 @@ class TrayController(QObject):
             self._menu.addAction("Mostra il widget", widget.bring_to_front)
             self._act_settings = self._menu.addAction("Impostazioni…", widget.open_settings)
             self._menu.addAction("Apri cartella registrazioni", widget.open_recordings_folder)
+            self._act_update = self._menu.addAction("Controlla aggiornamenti", widget.check_for_updates)
             self._menu.addSeparator()
             self._menu.addAction("Chiudi Orizon Call", widget.request_quit_interactive)
             self._menu.aboutToShow.connect(self._refresh)
@@ -702,6 +703,8 @@ class TrayController(QObject):
         self._act_pause.setVisible(state in ("recording", "paused"))
         self._act_pause.setText("Riprendi" if state == "paused" else "Pausa")
         self._act_settings.setEnabled(state == "idle" and not busy)
+        mgr = getattr(self._widget, "_update_manager", None)
+        self._act_update.setVisible(mgr is not None and mgr.available)
 
     def set_state(self, state: str, busy: bool) -> None:
         """Keep the tooltip in sync; called on every state transition only
@@ -769,6 +772,7 @@ class FloatingRecorderWidget(QWidget):
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
         self._privacy_guard = None   # screen_privacy.ScreenShareGuard
         self._call_assistant = None  # call_detection.CallAssistant
+        self._update_manager = None  # updater.UpdateManager
 
         # Animation state: 0.0 = circle, 1.0 = pill
         self._anim_progress = 0.0
@@ -1188,6 +1192,8 @@ class FloatingRecorderWidget(QWidget):
         # Format/folder changes only make sense while nothing is recording.
         settings_action.setEnabled(state == RecordingState.IDLE and not self._busy)
         menu.addAction("Apri cartella registrazioni", self._open_recordings_folder)
+        if self._update_manager is not None and self._update_manager.available:
+            menu.addAction("Controlla aggiornamenti", self.check_for_updates)
         menu.addSeparator()
         menu.addAction("Chiudi Orizon Call", self._quit_requested)
 
@@ -1262,6 +1268,8 @@ class FloatingRecorderWidget(QWidget):
         try:
             if self._call_assistant is not None:
                 self._call_assistant.shutdown()
+            if self._update_manager is not None:
+                self._update_manager.shutdown()
         except Exception:
             pass
         try:
@@ -1406,11 +1414,22 @@ class FloatingRecorderWidget(QWidget):
     def set_call_assistant(self, assistant) -> None:
         self._call_assistant = assistant
 
+    def set_update_manager(self, manager) -> None:
+        self._update_manager = manager
+
+    @pyqtSlot()
+    def check_for_updates(self) -> None:
+        """Tray / right-click 'Controlla aggiornamenti': always answers."""
+        if self._update_manager is not None:
+            self._update_manager.check_manually()
+
     def apply_ui_settings(self, values: dict) -> None:
         """Push the non-recording settings (hide from screen sharing, call
         detection mode, ignored apps) to the live helpers."""
         if self._privacy_guard is not None and "hide_from_screen_share" in values:
             self._privacy_guard.set_enabled(values["hide_from_screen_share"])
+        if self._update_manager is not None and "auto_update_check" in values:
+            self._update_manager.set_enabled(values["auto_update_check"])
         if self._call_assistant is not None:
             if "call_detection_ignored" in values:
                 self._call_assistant.set_ignored(values["call_detection_ignored"])
@@ -1423,11 +1442,13 @@ class FloatingRecorderWidget(QWidget):
         return (self._busy or self._recorder.state != RecordingState.IDLE
                 or self._recorder.is_preroll_active)
 
-    def show_call_prompt(self, text: str, actions, on_timeout=None) -> "PromptToast":
-        """Ask the user something about a detected call; ``actions`` are
-        (label, callback, accent) tuples. Returns the prompt so the caller
-        can withdraw it (``close_silently``) when it becomes moot."""
-        prompt = PromptToast(text, actions, on_timeout=on_timeout)
+    def show_prompt(self, text: str, actions, on_timeout=None,
+                    duration_ms: int = 30000) -> "PromptToast":
+        """Ask the user something (detected call, available update);
+        ``actions`` are (label, callback, accent) tuples. Returns the
+        prompt so the caller can withdraw it (``close_silently``) when it
+        becomes moot."""
+        prompt = PromptToast(text, actions, on_timeout=on_timeout, duration_ms=duration_ms)
         prompt.show_above(self)
         return prompt
 

@@ -81,7 +81,7 @@ orizon-call
 
 | Azione | Comando |
 |---|---|
-| Aggiornare all'ultima versione | `orizon-call update` |
+| Aggiornare all'ultima versione | automatico dall'app (vedi sotto), oppure `orizon-call update` |
 | Disinstallare (le registrazioni restano) | `orizon-call uninstall` |
 | Vedere tutte le opzioni | `orizon-call --help` |
 
@@ -151,6 +151,30 @@ l'audio, senza toccare il terminale. Le scelte restano memorizzate.
   (sinistra = microfono, destra = sistema: comoda per la trascrizione).
   Le modifiche valgono subito dalla registrazione successiva, senza riavvio.
 
+### Aggiornamenti automatici
+
+L'app controlla da sola se su GitHub c'è una versione nuova (poco dopo
+l'avvio e poi ogni 6 ore). Se c'è, sopra il widget compare la proposta con
+le novità principali:
+
+- **Aggiorna ora** → l'app si chiude, scarica e installa l'aggiornamento
+  (lo stesso procedimento di `orizon-call update`) e **si riapre da sola**;
+  all'avvio successivo una notifica conferma l'esito;
+- **Più tardi** → te lo ripropone il giorno dopo.
+
+Non interrompe mai una registrazione: se l'aggiornamento arriva durante una
+call, viene proposto quando premi stop. Puoi anche controllare a mano dal
+menu (click destro o icona nella barra di stato) → **Controlla
+aggiornamenti**, e disattivare il controllo da **Impostazioni →
+Aggiornamenti** (o per una sessione con `--no-update-check`).
+
+Il repository è privato: il controllo usa la stessa autenticazione
+dell'installer (la GitHub CLI già collegata con `gh auth login`, oppure
+`GITHUB_TOKEN`). Se l'aggiornamento non va a buon fine resta la versione
+precedente e il dettaglio è in `~/.orizon-call/logs/update.log`. Le copie
+avviate da una cartella di sviluppo (`git clone` + `python3 main.py`) non
+vengono mai aggiornate dall'app: lì si usa `git pull`.
+
 ### Invisibile a chi vede il tuo schermo
 
 Quando condividi lo schermo in Meet, Zoom o Teams (o fai una registrazione
@@ -167,7 +191,7 @@ sessione con `--show-in-screen-share`).
 
 ### Rilevamento automatico delle call
 
-Quando un'altra app inizia a usare il microfono per qualche secondo (Meet
+Quando un'altra app inizia a usare il microfono (la proposta compare in circa 2 secondi) (Meet
 nel browser, Zoom, Teams, Slack, Discord, FaceTime, WhatsApp…), Orizon Call
 capisce che è partita una call e sopra il widget compare una proposta:
 
@@ -217,6 +241,7 @@ orizon-call --no-system-audio  # solo microfono
 orizon-call --output-dir DIR   # cartella di destinazione
 orizon-call --call-detection auto   # rilevamento call: off | propose | auto
 orizon-call --show-in-screen-share  # il widget compare nella condivisione schermo
+orizon-call --no-update-check      # niente controllo aggiornamenti in questa sessione
 orizon-call --help             # tutte le opzioni
 ```
 
@@ -230,6 +255,8 @@ orizon-call --help             # tutte le opzioni
 - **Rilevamento automatico delle call**: quando un'altra app usa il
   microfono propone di registrare (o registra da sola) e a fine call
   propone di salvare.
+- **Aggiornamenti dall'app**: propone le nuove versioni, si aggiorna e si
+  riapre da sola, mai durante una registrazione.
 - **Audio di sistema senza driver**: macOS 13+ (helper ScreenCaptureKit),
   Windows (WASAPI loopback), Linux (monitor PulseAudio/PipeWire).
 - **Mix allineato al campione**: le due sorgenti sono scritte solo nella
@@ -275,8 +302,8 @@ cd orizon-call
 
 In alternativa manuale: `pip install -r requirements.txt && python3 main.py`.
 
-**Test** (260+ casi: allineamento writer, deriva/starvation, split, state
-machine, watchdog, API, sicurezza, normalizzazione, rilevamento dispositivi, rilevamento call, privacy condivisione schermo)
+**Test** (290+ casi: allineamento writer, deriva/starvation, split, state
+machine, watchdog, API, sicurezza, normalizzazione, rilevamento dispositivi, rilevamento call, privacy condivisione schermo, aggiornamenti)
 e lint:
 
 ```bash
@@ -309,4 +336,6 @@ Line Tools: `cd helpers && ./build.sh`. Diagnostica cattura:
 | «Un'altra istanza è già in esecuzione» | C'è già un Orizon Call attivo (controlla il widget); oppure usa `--api-port` per cambiare porta |
 | Il widget si vede ancora nella condivisione schermo | Verifica **Impostazioni → Privacy e call**. Su Linux non è possibile nasconderlo; su macOS 15+ alcune app che usano ScreenCaptureKit lo mostrano comunque |
 | La proposta di registrare compare senza una call | Un'app tiene aperto il microfono (es. un effetto voce sempre attivo): scegli **Mai per quest'app**, oppure imposta il rilevamento su *Non fare nulla* |
+| «Accesso a GitHub negato» controllando gli aggiornamenti | Il repository è privato: esegui `gh auth login` una volta (GitHub CLI), poi **Controlla aggiornamenti** |
+| L'aggiornamento automatico non è riuscito | L'app riparte con la versione precedente: dettagli in `~/.orizon-call/logs/update.log`, oppure aggiorna da terminale con `orizon-call update` |
 | Log dettagliati | `orizon-call --verbose`, file di log in `~/.orizon-call/logs/` |

@@ -30,6 +30,7 @@ DEFAULTS = {
     "hide_from_screen_share": True,  # widget visible to me, not to who sees my screen
     "call_detection": "propose",     # off | propose | auto
     "call_detection_ignored": [],    # apps whose calls are never proposed
+    "auto_update_check": True,       # look for updates on GitHub and propose them
 }
 
 CALL_DETECTION_MODES = ("off", "propose", "auto")
@@ -109,6 +110,7 @@ def load_settings(qs: Optional[QSettings] = None) -> dict:
         if mode in CALL_DETECTION_MODES:
             s["call_detection"] = mode
         s["call_detection_ignored"] = _to_str_list(qs.value("call_detection_ignored"))
+        s["auto_update_check"] = _to_bool(qs.value("auto_update_check"), s["auto_update_check"])
     finally:
         qs.endGroup()
     return s
@@ -150,6 +152,8 @@ def merge_cli_overrides(s: dict, args) -> dict:
         s["call_detection"] = args.call_detection
     if getattr(args, "show_in_screen_share", False):
         s["hide_from_screen_share"] = False
+    if getattr(args, "no_update_check", False):
+        s["auto_update_check"] = False
     return s
 
 

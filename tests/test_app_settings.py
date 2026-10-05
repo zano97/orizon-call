@@ -40,6 +40,7 @@ class TestLoadSave:
             "hide_from_screen_share": False,
             "call_detection": "auto",
             "call_detection_ignored": ["Zoom", "Slack"],
+            "auto_update_check": False,
         }
         app_settings.save_settings(values, qs)
         # Re-read through a fresh instance on the same ini file: values
