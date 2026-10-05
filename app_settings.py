@@ -27,7 +27,12 @@ DEFAULTS = {
     "normalize": False,       # post-stop loudness normalization
     "normalize_lufs": -16.0,  # target when normalize is on
     "system_audio": True,     # capture system audio alongside the mic
+    "hide_from_screen_share": True,  # widget visible to me, not to who sees my screen
+    "call_detection": "propose",     # off | propose | auto
+    "call_detection_ignored": [],    # apps whose calls are never proposed
 }
+
+CALL_DETECTION_MODES = ("off", "propose", "auto")
 
 
 def make_qsettings() -> QSettings:
@@ -68,11 +73,24 @@ def _to_float(value, default: float) -> float:
         return default
 
 
+def _to_str_list(value) -> list:
+    """QSettings hands lists back as None (empty, ini), a bare str (one
+    item, ini) or a list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if v]
+    return []
+
+
 def load_settings(qs: Optional[QSettings] = None) -> dict:
     """Saved settings merged over DEFAULTS. Unknown/corrupt values fall
     back to their default instead of raising."""
     qs = qs or make_qsettings()
     s = dict(DEFAULTS)
+    s["call_detection_ignored"] = []
     qs.beginGroup(_GROUP)
     try:
         fmt = qs.value("output_format", s["output_format"])
@@ -85,6 +103,12 @@ def load_settings(qs: Optional[QSettings] = None) -> dict:
         s["normalize"] = _to_bool(qs.value("normalize"), s["normalize"])
         s["normalize_lufs"] = _to_float(qs.value("normalize_lufs"), s["normalize_lufs"])
         s["system_audio"] = _to_bool(qs.value("system_audio"), s["system_audio"])
+        s["hide_from_screen_share"] = _to_bool(
+            qs.value("hide_from_screen_share"), s["hide_from_screen_share"])
+        mode = qs.value("call_detection", s["call_detection"])
+        if mode in CALL_DETECTION_MODES:
+            s["call_detection"] = mode
+        s["call_detection_ignored"] = _to_str_list(qs.value("call_detection_ignored"))
     finally:
         qs.endGroup()
     return s
@@ -96,7 +120,10 @@ def save_settings(values: dict, qs: Optional[QSettings] = None) -> None:
     try:
         for key in DEFAULTS:
             if key in values:
-                qs.setValue(key, values[key])
+                value = values[key]
+                if isinstance(value, (list, tuple)):
+                    value = list(value)
+                qs.setValue(key, value)
     finally:
         qs.endGroup()
     qs.sync()
@@ -119,6 +146,10 @@ def merge_cli_overrides(s: dict, args) -> dict:
         s["normalize_lufs"] = float(args.normalize)
     if getattr(args, "no_system_audio", False):
         s["system_audio"] = False
+    if getattr(args, "call_detection", None) in CALL_DETECTION_MODES:
+        s["call_detection"] = args.call_detection
+    if getattr(args, "show_in_screen_share", False):
+        s["hide_from_screen_share"] = False
     return s
 
 

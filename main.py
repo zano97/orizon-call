@@ -220,6 +220,20 @@ def main() -> None:
         action="store_true",
         help="Disable token auth for the local API (NOT recommended).",
     )
+    parser.add_argument(
+        "--call-detection",
+        choices=["off", "propose", "auto"],
+        default=None,
+        help="When another app starts using the microphone (a call): "
+             "propose to record (default), start recording automatically, "
+             "or do nothing.",
+    )
+    parser.add_argument(
+        "--show-in-screen-share",
+        action="store_true",
+        help="Let the widget appear when the screen is shared or recorded "
+             "(default: hidden from capture where the OS allows it).",
+    )
     args = parser.parse_args()
     if not 1 <= args.api_port <= 65535:
         parser.error("--api-port must be between 1 and 65535")
@@ -312,6 +326,21 @@ def main() -> None:
 
     if settings["system_audio"] and not sys_ok:
         log.info("System audio not available. Mic only.\n%s", guidance)
+
+    # Hide every app window (widget, toasts, menus, dialogs) from screen
+    # sharing: visible on the user's monitor, not to the other participants.
+    from screen_privacy import ScreenShareGuard
+    widget.set_privacy_guard(ScreenShareGuard(app, enabled=settings["hide_from_screen_share"]))
+
+    # Detect calls (another app holding the microphone) and offer to record.
+    from call_detection import CallAssistant
+    widget.set_call_assistant(CallAssistant(
+        widget,
+        mode=settings["call_detection"],
+        ignored=settings["call_detection_ignored"],
+        on_ignored_changed=lambda apps: app_settings.save_settings(
+            {"call_detection_ignored": apps}),
+    ))
 
     _install_graceful_shutdown(app, widget, recorder)
     widget.show()

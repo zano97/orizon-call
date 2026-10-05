@@ -37,6 +37,9 @@ class TestLoadSave:
             "normalize": True,
             "normalize_lufs": -14.0,
             "system_audio": False,
+            "hide_from_screen_share": False,
+            "call_detection": "auto",
+            "call_detection_ignored": ["Zoom", "Slack"],
         }
         app_settings.save_settings(values, qs)
         # Re-read through a fresh instance on the same ini file: values
@@ -49,8 +52,10 @@ class TestLoadSave:
         qs.setValue("output_format", "ogg")        # not supported
         qs.setValue("normalize_lufs", "not-a-number")
         qs.setValue("dual_track", "maybe")
+        qs.setValue("call_detection", "always")
         qs.endGroup()
         s = app_settings.load_settings(qs)
+        assert s["call_detection"] == app_settings.DEFAULTS["call_detection"]
         assert s["output_format"] == app_settings.DEFAULTS["output_format"]
         assert s["normalize_lufs"] == app_settings.DEFAULTS["normalize_lufs"]
         assert s["dual_track"] == app_settings.DEFAULTS["dual_track"]
@@ -76,6 +81,14 @@ class TestCliOverrides:
         assert merged["normalize"] is True
         assert merged["normalize_lufs"] == -14.0
         assert merged["system_audio"] is False
+
+    def test_privacy_and_call_flags(self):
+        s = dict(app_settings.DEFAULTS)
+        merged = app_settings.merge_cli_overrides(
+            s, _args(call_detection="off", show_in_screen_share=True))
+        assert merged["call_detection"] == "off"
+        assert merged["hide_from_screen_share"] is False
+        assert app_settings.merge_cli_overrides(s, _args()) == s
 
     def test_overrides_do_not_mutate_input(self):
         s = dict(app_settings.DEFAULTS)

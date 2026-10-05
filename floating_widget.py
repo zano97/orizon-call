@@ -59,6 +59,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSystemTrayIcon,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -212,8 +213,9 @@ class Toast(QWidget):
         if on_click is not None:
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(8)
         label = QLabel(text, self)
         label.setStyleSheet(
             f"color: {COLOR_WHITE.name()}; font-size: 13px; background: transparent;"
@@ -234,9 +236,12 @@ class Toast(QWidget):
         self._fade_out.setEndValue(0.0)
         self._fade_out.finished.connect(self._dismiss)
 
-        QTimer.singleShot(duration_ms, self._start_fade_out)
+        QTimer.singleShot(duration_ms, self._on_timeout)
 
     # -- lifecycle --
+
+    def _on_timeout(self) -> None:
+        self._start_fade_out()
 
     def show_above(self, anchor: QWidget) -> None:
         # Stack above the toasts still visible instead of covering them
@@ -296,6 +301,87 @@ class Toast(QWidget):
         bar.addRoundedRect(QRectF(4, 8, 3, self.height() - 16), 1.5, 1.5)
         p.fillPath(bar, QBrush(self._accent))
         p.end()
+
+
+_PROMPT_BUTTON_STYLE = """
+QPushButton {
+    color: #f8fafc;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+}
+QPushButton:hover { background: #334155; }
+QPushButton[accent="true"] {
+    color: #08110a;
+    background: #6bef1a;
+    border: 1px solid #4ac300;
+    font-weight: 600;
+}
+QPushButton[accent="true"]:hover { background: #4ac300; color: #f8fafc; }
+"""
+
+
+class PromptToast(Toast):
+    """
+    A toast that asks something: message plus a row of buttons (used by
+    call detection: "record this call?"). Clicking the background does
+    nothing; it fades out on its own after ``duration_ms`` and then calls
+    ``on_timeout``. Like every app window, it is hidden from screen
+    sharing by the ScreenShareGuard.
+    """
+
+    def __init__(self, text: str, actions, on_timeout=None,
+                 duration_ms: int = 30000, kind: str = "info"):
+        super().__init__(text, kind=kind, duration_ms=duration_ms)
+        self._on_timeout_cb = on_timeout
+        self._answered = False
+        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addStretch()
+        self.buttons: "list[QPushButton]" = []
+        for label, callback, accent in actions:
+            btn = QPushButton(label, self)
+            btn.setStyleSheet(_PROMPT_BUTTON_STYLE)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            if accent:
+                btn.setProperty("accent", True)
+            btn.clicked.connect(lambda _checked=False, cb=callback: self._choose(cb))
+            row.addWidget(btn)
+            self.buttons.append(btn)
+        self.layout().addLayout(row)
+        self.adjustSize()
+
+    def _choose(self, callback) -> None:
+        if self._answered:
+            return
+        self._answered = True
+        self._dismiss()
+        try:
+            callback()
+        except Exception:
+            log.exception("Prompt action failed")
+
+    def _on_timeout(self) -> None:
+        if self._answered or not self.isVisible():
+            return
+        self._answered = True
+        self._start_fade_out()
+        if self._on_timeout_cb is not None:
+            try:
+                self._on_timeout_cb()
+            except Exception:
+                log.exception("Prompt timeout handler failed")
+
+    def close_silently(self) -> None:
+        """Withdraw the question (it became moot): no callback."""
+        self._answered = True
+        self._start_fade_out()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        event.accept()   # only the buttons answer
 
 
 # ---------- Small widgets ----------
@@ -681,6 +767,8 @@ class FloatingRecorderWidget(QWidget):
         self._settings_dialog_open = False
         self._pending_settings: dict | None = None  # saved while recording
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        self._privacy_guard = None   # screen_privacy.ScreenShareGuard
+        self._call_assistant = None  # call_detection.CallAssistant
 
         # Animation state: 0.0 = circle, 1.0 = pill
         self._anim_progress = 0.0
@@ -1122,6 +1210,9 @@ class FloatingRecorderWidget(QWidget):
             self._settings_dialog_open = False
         if not values:
             return
+        # Privacy and call detection are not recording parameters: they
+        # apply right away, whatever the recorder is doing.
+        self.apply_ui_settings(values)
         if self._recorder.state == RecordingState.IDLE and not self._busy:
             app_settings.apply_to_recorder(self._recorder, values)
             self._pending_settings = None
@@ -1168,6 +1259,11 @@ class FloatingRecorderWidget(QWidget):
         """aboutToQuit hook: stop timers, drop the tray icon and run the
         recorder's last-resort finalization (a no-op when idle)."""
         self._closing = True
+        try:
+            if self._call_assistant is not None:
+                self._call_assistant.shutdown()
+        except Exception:
+            pass
         try:
             self._update_timer.stop()
             if self._raise_timer is not None:
@@ -1301,6 +1397,57 @@ class FloatingRecorderWidget(QWidget):
     @pyqtSlot()
     def api_unmute(self) -> None:
         self._set_mute(False)
+
+    # ---------- Screen-share privacy and call detection ----------
+
+    def set_privacy_guard(self, guard) -> None:
+        self._privacy_guard = guard
+
+    def set_call_assistant(self, assistant) -> None:
+        self._call_assistant = assistant
+
+    def apply_ui_settings(self, values: dict) -> None:
+        """Push the non-recording settings (hide from screen sharing, call
+        detection mode, ignored apps) to the live helpers."""
+        if self._privacy_guard is not None and "hide_from_screen_share" in values:
+            self._privacy_guard.set_enabled(values["hide_from_screen_share"])
+        if self._call_assistant is not None:
+            if "call_detection_ignored" in values:
+                self._call_assistant.set_ignored(values["call_detection_ignored"])
+            if "call_detection" in values:
+                self._call_assistant.set_mode(values["call_detection"])
+
+    def is_capturing_mic(self) -> bool:
+        """This process holds the microphone (recording, start/stop in
+        flight, or pre-roll streams open while idle)."""
+        return (self._busy or self._recorder.state != RecordingState.IDLE
+                or self._recorder.is_preroll_active)
+
+    def show_call_prompt(self, text: str, actions, on_timeout=None) -> "PromptToast":
+        """Ask the user something about a detected call; ``actions`` are
+        (label, callback, accent) tuples. Returns the prompt so the caller
+        can withdraw it (``close_silently``) when it becomes moot."""
+        prompt = PromptToast(text, actions, on_timeout=on_timeout)
+        prompt.show_above(self)
+        return prompt
+
+    def start_recording_for_call(self, app: str, automatic: bool) -> None:
+        if self._busy or self._recorder.state != RecordingState.IDLE:
+            return
+        if automatic:
+            self.notify(f"Call rilevata su {app}: registrazione avviata.",
+                        kind="info", duration_ms=5000)
+        # Automatic start: nobody clicked, so errors become a notification
+        # instead of a modal dialog.
+        self._start_recording(interactive=not automatic)
+
+    def stop_recording_for_call(self, app: str, automatic: bool) -> None:
+        if self._recorder.state not in (RecordingState.RECORDING, RecordingState.PAUSED):
+            return
+        if automatic:
+            self.notify(f"La call su {app} è terminata: salvo la registrazione.",
+                        kind="info", duration_ms=5000)
+        self._handle_stop()
 
     # ---------- Actions ----------
 
