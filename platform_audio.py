@@ -319,7 +319,10 @@ def _detect_linux_pulsectl() -> list:
     best monitor source, or an empty list."""
     try:
         import pulsectl
-    except ImportError:
+    except Exception:
+        # Not installed, or installed but libpulse.so.0 is missing (pure
+        # ALSA systems): pulsectl raises OSError at import. Fall back to
+        # the PortAudio/ALSA device scan.
         return []
 
     try:

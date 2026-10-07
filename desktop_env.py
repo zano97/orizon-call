@@ -175,7 +175,7 @@ def macos_location_problem(bundle: Optional[Path]) -> Optional[str]:
     read-only path) or 'readonly'. None = fine."""
     if bundle is None:
         return None
-    text = str(bundle)
+    text = bundle.as_posix()
     if "/AppTranslocation/" in text:
         return "translocated"
     if text.startswith("/Volumes/"):

@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import patch
 
 from platform_audio import detect_mic_device, detect_system_audio_device
@@ -126,3 +127,22 @@ def test_detect_mic_device_no_valid_devices():
 
         result = detect_mic_device()
         assert result == (None, 0, 0)
+
+
+def test_pulsectl_without_libpulse_falls_back(monkeypatch):
+    """Pure-ALSA Linux: pulsectl is installed but libpulse.so.0 is not, so
+    the import raises OSError (not ImportError). Device detection must
+    fall back instead of failing."""
+    import builtins
+
+    import platform_audio
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "pulsectl":
+            raise OSError("libpulse.so.0: cannot open shared object file")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "pulsectl", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert platform_audio._detect_linux_pulsectl() == []
