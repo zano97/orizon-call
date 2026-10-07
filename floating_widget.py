@@ -33,7 +33,6 @@ from PyQt6.QtCore import (
     QSettings,
     Qt,
     QTimer,
-    QUrl,
     pyqtProperty,
     pyqtSignal,
     pyqtSlot,
@@ -42,7 +41,6 @@ from PyQt6.QtGui import (
     QBrush,
     QColor,
     QCursor,
-    QDesktopServices,
     QFont,
     QIcon,
     QMouseEvent,
@@ -1665,7 +1663,8 @@ class FloatingRecorderWidget(QWidget):
         return self._recorder.output_directory
 
     def _open_recordings_folder(self) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.recordings_dir())))
+        import desktop_env
+        desktop_env.open_path(self.recordings_dir())
 
     def _quit_requested(self) -> None:
         self._quit_app(confirm=True)

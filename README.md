@@ -31,68 +31,81 @@ Soundflower): su macOS 13+ usa un helper nativo basato su ScreenCaptureKit,
 su Windows il loopback WASAPI, su Linux i monitor source di
 PulseAudio/PipeWire.
 
-## Installazione (un solo comando)
+## Installazione
 
-Il repository è privato, quindi serve un account GitHub con accesso e la
-**GitHub CLI** autenticata — una volta sola:
+Scarica il file per il tuo sistema dall'ultima versione nella pagina
+**[Releases](https://github.com/zano97/orizon-call/releases/latest)**: è
+un'app completa, non serve installare Python né usare il terminale.
 
-```bash
-brew install gh        # macOS   (Windows: winget install GitHub.cli)
-gh auth login          # login con il tuo account GitHub
-```
+| Sistema | File da scaricare | Come si installa |
+|---|---|---|
+| **macOS** Apple Silicon (M1, M2…) | `OrizonCall-<versione>-macos-arm64.dmg` | Apri il `.dmg` e trascina **Orizon Call** in **Applicazioni** |
+| **macOS** Intel | `OrizonCall-<versione>-macos-x86_64.dmg` | Come sopra |
+| **Windows** 10/11 | `OrizonCall-<versione>-windows-x64-setup.exe` | Doppio click e **Installa**: niente permessi di amministratore |
+| **Linux** (x86_64) | `OrizonCall-<versione>-linux-x86_64.AppImage` | Rendilo eseguibile (tasto destro → Proprietà → *Consenti l'esecuzione*, oppure `chmod +x`) e aprilo con doppio click |
 
-Poi l'installazione è un solo comando.
+Al primo avvio l'app si integra da sola: su Linux compare nel menu delle
+applicazioni, su macOS (se l'hai aperta direttamente dal `.dmg`) propone
+di spostarsi in **Applicazioni**, su Windows è nel menu Start (e, se lo
+scegli in installazione, sul Desktop e all'avvio di Windows).
 
-### macOS / Linux
+**Aggiornamenti**: non devi più scaricare nulla a mano. Quando esce una
+nuova versione l'app la scarica in background, ti mostra le novità e, con
+un click su **Aggiorna e riavvia**, si chiude e si riapre aggiornata
+(dettagli in [Aggiornamenti automatici](#aggiornamenti-automatici)).
 
-Apri il Terminale e incolla:
-
-```bash
-gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.sh | bash
-```
-
-### Windows 10/11
-
-Apri **PowerShell** e incolla:
-
-```powershell
-gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.ps1 | Out-String | iex
-```
-
-Fine. L'installer riconosce da solo la GitHub CLI e la usa anche per
-scaricare il codice e per i futuri `orizon-call update`. Per il resto fa
-tutto da solo:
-
-1. controlla i prerequisiti (Python ≥ 3.10, su Linux la libreria PortAudio)
-   e dove possibile **li installa automaticamente**;
-2. scarica l'app da GitHub e crea un ambiente Python **isolato** (non tocca
-   il Python di sistema);
-3. installa il comando **`orizon-call`** nel terminale e l'icona per
-   avviarla con un click: su macOS in `~/Applications`, su Linux nel menu
-   applicazioni, su Windows nel menu Start e sul Desktop.
-
-Al termine avvii l'app con:
-
-```bash
-orizon-call
-```
-
-…oppure cliccando l'icona **Orizon Call**.
-
-| Azione | Comando |
-|---|---|
-| Aggiornare all'ultima versione | automatico dall'app (vedi sotto), oppure `orizon-call update` |
-| Disinstallare (le registrazioni restano) | `orizon-call uninstall` |
-| Vedere tutte le opzioni | `orizon-call --help` |
+> **Primo avvio di una versione non firmata** — finché l'app non è firmata
+> con un certificato Apple/Microsoft (vedi [RELEASING.md](RELEASING.md)):
+> - **macOS**: se compare «non può essere aperta perché lo sviluppatore non
+>   può essere verificato», apri **Impostazioni di Sistema → Privacy e
+>   sicurezza** e premi **Apri comunque** (una sola volta);
+> - **Windows**: se compare «Windows ha protetto il PC», premi **Ulteriori
+>   informazioni → Esegui comunque** (una sola volta).
+>
+> Con la firma questi avvisi spariscono e, su macOS, i permessi restano
+> validi anche dopo gli aggiornamenti.
 
 > **Permessi macOS** — al primo avvio macOS chiede l'accesso al
 > **Microfono** e alla **Registrazione schermo**: quest'ultima è il permesso
 > che ScreenCaptureKit usa per catturare l'audio di sistema (lo schermo non
-> viene mai registrato). Si concede una sola volta.
+> viene mai registrato). Si concedono a «Orizon Call», una sola volta.
 
-> **MP3 e normalizzazione volume funzionano subito**: l'app include un
-> ffmpeg statico (via `imageio-ffmpeg`), su tutti i sistemi. Se sul
-> computer c'è già un ffmpeg di sistema, viene usato quello.
+> **Linux** — serve un sistema con PulseAudio o PipeWire (tutte le
+> distribuzioni desktop recenti) e il plugin ALSA per l'audio di sistema:
+> `sudo apt install libasound2-plugins` (Debian/Ubuntu),
+> `alsa-plugins-pulseaudio` o `pipewire-alsa` (Fedora). L'AppImage gira su
+> Ubuntu 22.04 o più recenti e distribuzioni equivalenti.
+
+**Disinstallare** (le registrazioni restano dove sono): su macOS trascina
+l'app nel Cestino; su Windows da **Impostazioni → App → Orizon Call →
+Disinstalla**; su Linux elimina il file `.AppImage` (e, se vuoi,
+`~/.local/share/applications/orizon-call.desktop`).
+
+<details>
+<summary><b>Installazione da terminale (sviluppatori)</b></summary>
+
+Installa il codice sorgente in un ambiente Python isolato. Serve l'accesso
+al repository e la **GitHub CLI** autenticata (`gh auth login`).
+
+```bash
+# macOS / Linux
+gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+gh api -H "Accept: application/vnd.github.raw" repos/zano97/orizon-call/contents/install.ps1 | Out-String | iex
+```
+
+Poi: `orizon-call` per avviarla, `orizon-call update` per aggiornarla
+(anche questa copia propone gli aggiornamenti quando esce una nuova
+versione), `orizon-call uninstall` per rimuoverla.
+
+</details>
+
+> **MP3 e normalizzazione volume funzionano subito**: l'app include ffmpeg,
+> su tutti i sistemi. Se sul computer c'è già un ffmpeg di sistema, viene
+> usato quello.
 
 ## Come si usa
 
@@ -153,27 +166,28 @@ l'audio, senza toccare il terminale. Le scelte restano memorizzate.
 
 ### Aggiornamenti automatici
 
-L'app controlla da sola se su GitHub c'è una versione nuova (poco dopo
-l'avvio e poi ogni 6 ore). Se c'è, sopra il widget compare la proposta con
-le novità principali:
+L'app controlla da sola se è uscita una nuova versione (poco dopo l'avvio e
+poi ogni 6 ore). Quando c'è, la **scarica in background**, ne verifica
+l'integrità (SHA-256 e, su macOS, la firma) e solo allora te la propone,
+con le novità principali:
 
-- **Aggiorna ora** → l'app si chiude, scarica e installa l'aggiornamento
-  (lo stesso procedimento di `orizon-call update`) e **si riapre da sola**;
-  all'avvio successivo una notifica conferma l'esito;
+- **Aggiorna e riavvia** → l'app si chiude e si riapre aggiornata in pochi
+  secondi (macOS sostituisce l'app in Applicazioni, Windows esegue il nuovo
+  installer in modo silenzioso, Linux sostituisce il file AppImage);
+  all'avvio una notifica conferma «aggiornato alla versione …»;
 - **Più tardi** → te lo ripropone il giorno dopo.
 
-Non interrompe mai una registrazione: se l'aggiornamento arriva durante una
-call, viene proposto quando premi stop. Puoi anche controllare a mano dal
-menu (click destro o icona nella barra di stato) → **Controlla
+Non interrompe mai una registrazione: se l'aggiornamento è pronto durante
+una call, viene proposto quando premi stop. Puoi anche controllare a mano
+dal menu (click destro o icona nella barra di stato) → **Controlla
 aggiornamenti**, e disattivare il controllo da **Impostazioni →
-Aggiornamenti** (o per una sessione con `--no-update-check`).
+Aggiornamenti** (o per una sessione con `--no-update-check`). La versione
+installata è scritta in fondo alle Impostazioni.
 
-Il repository è privato: il controllo usa la stessa autenticazione
-dell'installer (la GitHub CLI già collegata con `gh auth login`, oppure
-`GITHUB_TOKEN`). Se l'aggiornamento non va a buon fine resta la versione
-precedente e il dettaglio è in `~/.orizon-call/logs/update.log`. Le copie
-avviate da una cartella di sviluppo (`git clone` + `python3 main.py`) non
-vengono mai aggiornate dall'app: lì si usa `git pull`.
+Se qualcosa va storto resta la versione precedente e il dettaglio è in
+`~/.orizon-call/logs/update.log`. Se le versioni sono pubblicate su un
+repository privato, l'app usa la GitHub CLI collegata (`gh auth login`) o
+`GITHUB_TOKEN`; con un repository pubblico non serve nulla.
 
 ### Invisibile a chi vede il tuo schermo
 
@@ -255,8 +269,9 @@ orizon-call --help             # tutte le opzioni
 - **Rilevamento automatico delle call**: quando un'altra app usa il
   microfono propone di registrare (o registra da sola) e a fine call
   propone di salvare.
-- **Aggiornamenti dall'app**: propone le nuove versioni, si aggiorna e si
-  riapre da sola, mai durante una registrazione.
+- **App installabile su tutti e tre i sistemi** (`.dmg`, installer Windows,
+  AppImage) e **aggiornamenti dall'app**: scarica e verifica in background,
+  si aggiorna e si riapre da sola, mai durante una registrazione.
 - **Audio di sistema senza driver**: macOS 13+ (helper ScreenCaptureKit),
   Windows (WASAPI loopback), Linux (monitor PulseAudio/PipeWire).
 - **Mix allineato al campione**: le due sorgenti sono scritte solo nella
@@ -302,8 +317,9 @@ cd orizon-call
 
 In alternativa manuale: `pip install -r requirements.txt && python3 main.py`.
 
-**Test** (290+ casi: allineamento writer, deriva/starvation, split, state
-machine, watchdog, API, sicurezza, normalizzazione, rilevamento dispositivi, rilevamento call, privacy condivisione schermo, aggiornamenti)
+**Test** (320+ casi: allineamento writer, deriva/starvation, split, state
+machine, watchdog, API, sicurezza, normalizzazione, rilevamento dispositivi,
+rilevamento call, privacy condivisione schermo, aggiornamenti, pacchetti)
 e lint:
 
 ```bash
@@ -317,6 +333,11 @@ ruff check .
 Line Tools: `cd helpers && ./build.sh`. Diagnostica cattura:
 `python3 diag_sck.py`.
 
+**Pacchetti installabili** — `python packaging/build.py` costruisce sul
+sistema in uso il `.dmg`/`.zip` (macOS), l'installer `.exe` (Windows) o
+l'AppImage (Linux) in `dist/release/`, e ne esegue il self-test. Le release
+si pubblicano con un tag: vedi [RELEASING.md](RELEASING.md).
+
 **Design** — icone, logo e palette provengono dal design system ufficiale
 [orizon-design-theme](https://github.com/Orizon-eu/orizon-design-theme)
 (verde brand `#6bef1a`, scala slate).
@@ -325,8 +346,8 @@ Line Tools: `cd helpers && ./build.sh`. Diagnostica cattura:
 
 | Problema | Soluzione |
 |---|---|
-| macOS: «audio di sistema non disponibile» | Impostazioni di Sistema → Privacy e Sicurezza → **Registrazione schermo** → abilita l'app (o il Terminale), poi riavvia Orizon Call |
-| Linux: `PortAudio library not found` | `sudo apt install libportaudio2` (Debian/Ubuntu) / `sudo dnf install portaudio` (Fedora) |
+| macOS: «audio di sistema non disponibile» | Impostazioni di Sistema → Privacy e Sicurezza → **Registrazione schermo** → abilita **Orizon Call** (o il Terminale, se la avvii da terminale), poi riavvia Orizon Call |
+| Linux: `PortAudio library not found` (installazione da terminale) | `sudo apt install libportaudio2` (Debian/Ubuntu) / `sudo dnf install portaudio` (Fedora). L'AppImage la include già |
 | Linux: `Could not load the Qt platform plugin "xcb"` | `sudo apt install libxcb-cursor0 libegl1 libxkbcommon-x11-0` (l'installer lo propone da solo) |
 | Linux: audio di sistema assente (solo microfono) | Serve il plugin ALSA per PulseAudio/PipeWire: `sudo apt install libasound2-plugins` (Fedora: `alsa-plugins-pulseaudio`), l'installer lo propone da solo |
 | Mac Intel: «audio di sistema non disponibile» | L'helper incluso è per Apple Silicon: `xcode-select --install` e poi `orizon-call update` lo ricompila per il tuo Mac |
@@ -336,6 +357,8 @@ Line Tools: `cd helpers && ./build.sh`. Diagnostica cattura:
 | «Un'altra istanza è già in esecuzione» | C'è già un Orizon Call attivo (controlla il widget); oppure usa `--api-port` per cambiare porta |
 | Il widget si vede ancora nella condivisione schermo | Verifica **Impostazioni → Privacy e call**. Su Linux non è possibile nasconderlo; su macOS 15+ alcune app che usano ScreenCaptureKit lo mostrano comunque |
 | La proposta di registrare compare senza una call | Un'app tiene aperto il microfono (es. un effetto voce sempre attivo): scegli **Mai per quest'app**, oppure imposta il rilevamento su *Non fare nulla* |
-| «Accesso a GitHub negato» controllando gli aggiornamenti | Il repository è privato: esegui `gh auth login` una volta (GitHub CLI), poi **Controlla aggiornamenti** |
-| L'aggiornamento automatico non è riuscito | L'app riparte con la versione precedente: dettagli in `~/.orizon-call/logs/update.log`, oppure aggiorna da terminale con `orizon-call update` |
+| «Accesso agli aggiornamenti negato» | Le versioni sono su un repository privato: esegui `gh auth login` una volta (GitHub CLI), poi **Controlla aggiornamenti** |
+| macOS: «Sposta Orizon Call nella cartella Applicazioni» | L'app è stata aperta dal `.dmg` o da Download: accetta la proposta **Sposta in Applicazioni** (o trascinala tu), poi gli aggiornamenti funzionano |
+| L'aggiornamento automatico non è riuscito | L'app riparte con la versione precedente: dettagli in `~/.orizon-call/logs/update.log`; scarica l'ultima versione dalla pagina Releases |
+| Verificare che l'installazione sia completa | `orizon-call --self-test` (o, nell'app pacchettizzata, il suo eseguibile con `--self-test`): controlla audio, ffmpeg, interfaccia e componenti di sistema |
 | Log dettagliati | `orizon-call --verbose`, file di log in `~/.orizon-call/logs/` |

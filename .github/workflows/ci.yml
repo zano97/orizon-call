@@ -74,7 +74,7 @@ jobs:
           bash -n install.sh
           bash -n start.sh
       - name: shellcheck
-        run: shellcheck -S warning install.sh start.sh helpers/build.sh "Avvia Orizon Call.command"
+        run: shellcheck -S warning install.sh start.sh helpers/build.sh "Avvia Orizon Call.command" packaging/linux/build_portaudio.sh packaging/linux/AppRun
       - name: PowerShell parse install.ps1
         shell: pwsh
         run: |

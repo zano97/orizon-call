@@ -1,0 +1,4 @@
+#!/bin/sh
+# AppImage entry point: start the bundled app with the user's arguments.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/lib/orizon-call/orizon-call" "$@"
