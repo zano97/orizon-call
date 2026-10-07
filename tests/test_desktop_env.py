@@ -4,7 +4,7 @@ helper (executed for real with the macOS-only tools stubbed)."""
 
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import PurePosixPath
 
 import pytest
 
@@ -32,6 +32,7 @@ class TestCleanEnv:
                        "PYINSTALLER_RESET_ENVIRONMENT": "1"}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="AppImages exist on Linux only")
 class TestAppImageEntry:
 
     def test_created_then_idempotent_then_follows_moves(self, tmp_path):
@@ -73,7 +74,7 @@ class TestMacLocation:
         ("/Volumes/Orizon Call/Orizon Call.app", "dmg"),
     ])
     def test_problems(self, path, problem):
-        assert desktop_env.macos_location_problem(Path(path)) == problem
+        assert desktop_env.macos_location_problem(PurePosixPath(path)) == problem
 
     def test_fine_and_none(self, tmp_path):
         app = tmp_path / "Orizon Call.app"

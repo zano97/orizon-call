@@ -107,8 +107,16 @@ def _check_platform(report) -> None:
         ctypes.WinDLL("user32").SetWindowDisplayAffinity  # screen-share privacy API
         report("WASAPI loopback (PyAudioWPatch) available")
     else:
-        import pulsectl  # noqa: F401
-        report("pulsectl available")
+        import importlib.util
+        if importlib.util.find_spec("pulsectl") is None:
+            raise RuntimeError("pulsectl not bundled")
+        try:
+            import pulsectl  # noqa: F401
+            report("pulsectl available")
+        except OSError as e:
+            # The package is there; the host lacks libpulse (pure ALSA
+            # system): the app still records, without PulseAudio extras.
+            report(f"pulsectl bundled, libpulse not on this system ({e})")
 
 
 def _check_app_modules(report) -> None:
