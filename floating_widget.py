@@ -129,7 +129,10 @@ def apply_macos_floating(widget: QWidget, activate: bool = False) -> None:
     toast and every dialog, because Qt creates a fresh NSWindow for each.
     ``activate`` brings the (accessory, dock-less) app forward so a modal
     dialog does not open behind the active application."""
-    if sys.platform != 'darwin':
+    # winId() is an NSView* only with the native Cocoa backend; under the
+    # offscreen/minimal plugins it is an opaque number and dereferencing it
+    # as an Objective-C object crashes the process.
+    if sys.platform != 'darwin' or QApplication.platformName() != 'cocoa':
         return
     try:
         from AppKit import NSApplication, NSFloatingWindowLevel

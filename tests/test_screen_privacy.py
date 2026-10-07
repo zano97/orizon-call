@@ -67,3 +67,24 @@ def test_real_call_never_raises(qapp):
     screen_privacy.set_window_excluded(w, True)
     screen_privacy.set_window_excluded(w, False)
     w.close()
+
+
+def test_no_native_calls_without_native_platform_plugin(qapp, monkeypatch):
+    """Under the offscreen plugin (tests, CI) winId() is not an NSView*/
+    HWND: dereferencing it crashed the macOS test run. Nothing native may
+    be touched there."""
+    assert QApplication.platformName() not in ("windows", "cocoa")
+    monkeypatch.setattr(screen_privacy, "is_supported", lambda: True)
+    touched = []
+    monkeypatch.setattr(screen_privacy, "_set_excluded_macos", lambda *a: touched.append(a))
+    monkeypatch.setattr(screen_privacy, "_set_excluded_windows", lambda *a: touched.append(a))
+    w = QWidget()
+    assert screen_privacy.set_window_excluded(w, True) is False
+    assert not touched
+
+    import floating_widget
+    monkeypatch.setattr(floating_widget.sys, "platform", "darwin")
+    called = []
+    monkeypatch.setattr(w, "winId", lambda: called.append(1) or 0)
+    floating_widget.apply_macos_floating(w)
+    assert not called
