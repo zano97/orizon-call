@@ -99,6 +99,11 @@ def set_window_excluded(widget: QWidget, excluded: bool) -> bool:
     Returns True when the platform accepted the change. Never raises."""
     if not is_supported() or widget is None or not widget.isWindow():
         return False
+    # winId() is an HWND / NSView* only with the native platform plugin;
+    # under offscreen/minimal it is an opaque number (dereferencing it as
+    # an NSView crashes the process).
+    if QApplication.platformName() not in ("windows", "cocoa"):
+        return False
     try:
         if sys.platform == "win32":
             return _set_excluded_windows(int(widget.winId()), excluded)
