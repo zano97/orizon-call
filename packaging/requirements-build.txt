@@ -1,0 +1,4 @@
+# Packaging toolchain (packaging/build.py). Pinned to a tested major:
+# a new PyInstaller release is adopted on purpose, not by accident.
+pyinstaller>=6.10,<7
+pyinstaller-hooks-contrib>=2024.8

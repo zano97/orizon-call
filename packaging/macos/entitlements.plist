@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the signed + notarized app.
+  - audio-input: microphone access under the hardened runtime.
+  - allow-unsigned-executable-memory / disable-library-validation: the
+    embedded Python interpreter (ctypes/cffi callbacks, extension modules
+    loaded at run time) needs them, as documented by PyInstaller.
+  Screen Recording (system audio via ScreenCaptureKit) needs no
+  entitlement: the user grants it once in System Settings.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

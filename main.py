@@ -147,6 +147,37 @@ def _install_graceful_shutdown(app, widget, recorder) -> None:
         pass
 
 
+def _desktop_integration(widget) -> None:
+    """Packaged app only: Linux AppImage → applications-menu entry;
+    macOS app started from the disk image or a quarantined download →
+    offer to move it to Applications (needed for updates and to keep the
+    Microphone/Screen Recording permissions across launches)."""
+    import desktop_env
+    if desktop_env.appimage_path() is not None:
+        desktop_env.ensure_linux_desktop_entry()
+        return
+    bundle = desktop_env.macos_bundle_path()
+    problem = desktop_env.macos_location_problem(bundle)
+    if problem not in ("dmg", "translocated"):
+        return
+
+    def move():
+        try:
+            dest = desktop_env.launch_move_to_applications(bundle)
+        except OSError as e:
+            widget.notify(f"Impossibile spostare l'app: {e}", kind="error")
+            return
+        log.info("Moving the app to %s", dest)
+        widget.request_quit()
+
+    from PyQt6.QtCore import QTimer
+    QTimer.singleShot(2500, lambda: widget.show_prompt(
+        "Orizon Call è stata aperta dal disco di installazione.\n"
+        "Spostala in Applicazioni: così si aggiorna da sola e ricorda i permessi.",
+        [("Sposta in Applicazioni", move, True), ("Non ora", lambda: None, False)],
+        duration_ms=60000))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Orizon Call - Floating Audio Recorder"
@@ -229,6 +260,21 @@ def main() -> None:
              "or do nothing.",
     )
     parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print the version and exit.",
+    )
+    parser.add_argument(
+        "--self-test",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="REPORT",
+        help="Check that this copy has every library it needs (audio, ffmpeg, "
+             "Qt, system helpers), print a report (optionally also to REPORT) "
+             "and exit. Opens no window and no audio device.",
+    )
+    parser.add_argument(
         "--no-update-check",
         action="store_true",
         help="Do not look for updates on GitHub during this session.",
@@ -240,6 +286,13 @@ def main() -> None:
              "(default: hidden from capture where the OS allows it).",
     )
     args = parser.parse_args()
+    if args.version:
+        from version import __version__
+        print(f"Orizon Call {__version__}")
+        return
+    if args.self_test is not None:
+        from self_test import run as run_self_test
+        sys.exit(run_self_test(args.self_test or None))
     if not 1 <= args.api_port <= 65535:
         parser.error("--api-port must be between 1 and 65535")
     if args.preroll < 0:
@@ -273,6 +326,16 @@ def main() -> None:
     bound_socket = _try_bind_or_explain(args.api_port)
     if bound_socket is None:
         sys.exit(1)
+
+    if sys.platform == "win32":
+        # Same AppUserModelID as the installer's shortcuts: taskbar grouping
+        # and notifications say "Orizon Call", not "Python".
+        try:
+            import ctypes
+            from version import BUNDLE_ID
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(BUNDLE_ID)
+        except Exception:
+            pass
 
     app = QApplication(sys.argv)
     app.setApplicationName("Orizon Call")
@@ -356,6 +419,7 @@ def main() -> None:
     _install_graceful_shutdown(app, widget, recorder)
     widget.show()
     QTimer.singleShot(1500, update_manager.report_last_update)
+    _desktop_integration(widget)
     if not mic_ok:
         QTimer.singleShot(500, lambda: widget.notify(
             "Nessun microfono trovato. Collegane uno: verrà cercato di nuovo "

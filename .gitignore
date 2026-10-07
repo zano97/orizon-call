@@ -4,3 +4,7 @@ __pycache__/
 .claude/
 .venv/
 venv/
+
+# Packaging output (packaging/build.py)
+/build/
+/dist/

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Orizon Call
+Comment=Registratore di chiamate (microfono + audio di sistema)
+Exec=orizon-call
+Icon=orizon-call
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;
+StartupWMClass=orizon-call

@@ -184,12 +184,8 @@ function Fetch-Repo {
         $tmp = Join-Path $env:TEMP 'orizon-call-unzip'
         if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
         Expand-Archive $zip -DestinationPath $tmp
-        $top = Get-ChildItem $tmp | Select-Object -First 1
         if (Test-Path $App) { Remove-Item -Recurse -Force $App }
-        Move-Item $top.FullName $App
-        # Lo zip non ha .git: la cartella "owner-repo-<sha>" dice quale
-        # commit e' installato (serve al controllo aggiornamenti dell'app).
-        Set-Content -Path (Join-Path $App '.installed_commit') -Value (($top.Name -split '-')[-1])
+        Move-Item (Get-ChildItem $tmp | Select-Object -First 1).FullName $App
         Remove-Item -Force $zip
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
         return $true

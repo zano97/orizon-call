@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 import app_settings
 import screen_privacy
 import updater
+from version import __version__
 
 # Orizon design tokens (kept in sync with floating_widget.py)
 _BG = "#0f172a"        # gray.900
@@ -249,15 +250,18 @@ class SettingsDialog(QDialog):
             "Controlla gli aggiornamenti e proponi di installarli", self)
         self._auto_update.setChecked(s["auto_update_check"])
         layout.addWidget(self._auto_update)
-        if not updater.is_managed_install():
-            update_hint = QLabel("Questa copia non è stata installata con l'installer "
-                                 "(cartella di sviluppo): si aggiorna con 'git pull'.", self)
+        if updater.install_kind() in ("dev", "frozen-other"):
+            update_hint = QLabel("Questa copia non si aggiorna da sola (cartella di sviluppo o "
+                                 "copia portatile).", self)
             update_hint.setProperty("hint", True)
             update_hint.setWordWrap(True)
             layout.addWidget(update_hint)
 
         # Pulsanti
         buttons = QHBoxLayout()
+        version_label = QLabel(f"Versione {__version__}", self)
+        version_label.setProperty("hint", True)
+        buttons.addWidget(version_label)
         buttons.addStretch()
         cancel = QPushButton("Annulla", self)
         cancel.clicked.connect(self.reject)

@@ -1,0 +1,192 @@
+name: Release
+
+# Builds the installable app for macOS (Apple Silicon + Intel), Windows and
+# Linux, runs the packaged app's self-test on each, and — for a version tag
+# — publishes them as a GitHub Release with SHA256SUMS.txt and the
+# CHANGELOG section as description. Installed apps update from there.
+#
+#   git tag v1.2.0 && git push origin v1.2.0      → build + publish
+#   Actions → Release → Run workflow               → build only (artifacts)
+#
+# Optional secrets (without them the builds are unsigned, see RELEASING.md):
+#   MACOS_CERT_P12, MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY,
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD           (sign + notarize)
+#   WINDOWS_CERT_PFX, WINDOWS_CERT_PASSWORD               (Authenticode)
+#   RELEASES_TOKEN  token with write access to RELEASES_REPO when it is
+#                   not this repository (version.py)
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - 'version.py'
+      - 'self_test.py'
+      - 'updater.py'
+      - 'desktop_env.py'
+      - 'requirements.txt'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: version and notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tag matches version.py, CHANGELOG has notes
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            python packaging/release_notes.py --check "${GITHUB_REF_NAME}"
+          else
+            python packaging/release_notes.py > /dev/null
+          fi
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: macos-arm64
+          - os: macos-15-intel
+            target: macos-x86_64
+          - os: windows-latest
+            target: windows-x64
+          # Oldest supported glibc: the AppImage then runs on every newer distro.
+          - os: ubuntu-22.04
+            target: linux-x86_64
+    env:
+      HAVE_MAC_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
+      HAVE_WIN_CERT: ${{ secrets.WINDOWS_CERT_PFX != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential libasound2-dev libpulse0 \
+            libegl1 libdbus-1-3 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xkb1 \
+            libxcb-util1 libxcb-shape0 libxcb-randr0 libxcb-xinerama0
+
+      - name: ScreenCaptureKit helper (macOS, native architecture)
+        if: runner.os == 'macOS'
+        run: bash helpers/build.sh && file helpers/system_audio_capture
+
+      - name: Inno Setup (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Python dependencies
+        run: pip install -r requirements.txt -r packaging/requirements-build.txt
+
+      - name: Signing certificate (macOS)
+        if: runner.os == 'macOS' && env.HAVE_MAC_CERT == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KC_PASS="$(uuidgen)"
+          security create-keychain -p "$KC_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PASS" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+      - name: Signing certificate (Windows)
+        if: runner.os == 'Windows' && env.HAVE_WIN_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_B64: ${{ secrets.WINDOWS_CERT_PFX }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_B64))
+          "WINDOWS_CERT_PFX=$pfx" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build, sign and self-test
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: python packaging/build.py
+
+      - name: Self-test report
+        if: always()
+        shell: bash
+        run: cat build/self-test.txt 2>/dev/null || echo "no report"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orizon-call-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          merge-multiple: true
+      - name: Checksums and notes
+        run: |
+          python packaging/build.py --checksums dist/release
+          python packaging/release_notes.py "${GITHUB_REF_NAME}" > notes.md
+          ls -la dist/release
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+        run: |
+          REPO="$(python -c 'from version import RELEASES_REPO; print(RELEASES_REPO)')"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$REPO" != "$GITHUB_REPOSITORY" ]; then
+            # Tag the releases repository at the version too.
+            TARGET_ARGS=()
+          else
+            TARGET_ARGS=(--target "$GITHUB_SHA")
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/release/* \
+            --repo "$REPO" "${TARGET_ARGS[@]}" \
+            --title "Orizon Call $VERSION" --notes-file notes.md
